@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { Task, CreateTaskInput, TaskStatus, TaskPriority } from '../../types/task';
-import type { Agent, Ticket, ApprovalRequest, AgentLog, LLMConfig, Interaction } from '../../types';
+import type { Agent, Ticket, ApprovalRequest, AgentLog, LLMConfig, Interaction, TaskChatMessage } from '../../types';
 import { TaskCard } from './TaskCard';
 import { CreateTaskModal } from './CreateTaskModal';
 import { AnalyzeMCPMessagesModal } from './AnalyzeMCPMessagesModal';
@@ -13,11 +13,13 @@ interface TaskPanelProps {
   approvalRequests?: ApprovalRequest[];
   agentLogs?: AgentLog[];
   interactions?: Interaction[];
+  taskChatMessages?: TaskChatMessage[];
   onCreateTask: (task: CreateTaskInput) => void;
   onUpdateTask: (id: string, updates: Partial<Task>) => void;
   onDeleteTask: (id: string) => void;
   onAssignAgent?: (taskId: string, agentId: string) => void;
   onRespondInteraction?: (interactionId: string, response: string) => void;
+  onSendTaskMessage?: (taskId: string, message: string) => void;
   availableMCPs: Array<{ id: string; type: string; name: string; status: string }>;
   llmConfig: LLMConfig;
   autoAssignMode?: 'global' | 'manual';
@@ -31,11 +33,13 @@ export function TaskPanel({
   approvalRequests = [],
   agentLogs = [],
   interactions = [],
+  taskChatMessages = [],
   onCreateTask,
   onUpdateTask,
   onDeleteTask,
   onAssignAgent,
   onRespondInteraction,
+  onSendTaskMessage,
   availableMCPs,
   llmConfig,
   autoAssignMode = 'manual',
@@ -90,7 +94,10 @@ export function TaskPanel({
     ? approvalRequests.filter(a => a.agentId === selectedTask?.assignedAgentId)
     : [];
   const taskAgentLogs = selectedTaskId
-    ? agentLogs.filter(log => log.agentId === selectedTask?.assignedAgentId)
+    ? agentLogs.filter(log => 
+        log.relatedTaskId === selectedTaskId || 
+        log.agentId === selectedTask?.assignedAgentId
+      )
     : [];
   const taskInteractions = selectedTaskId
     ? interactions.filter(i => i.taskId === selectedTaskId)
@@ -268,6 +275,8 @@ export function TaskPanel({
                       onAssignAgent={onAssignAgent}
                       onViewDetail={handleViewDetail}
                       autoAssignMode={autoAssignMode}
+                      taskChatMessages={taskChatMessages}
+                      onSendTaskMessage={onSendTaskMessage}
                     />
                   ))}
                 </div>
@@ -292,6 +301,8 @@ export function TaskPanel({
                       onAssignAgent={onAssignAgent}
                       onViewDetail={handleViewDetail}
                       autoAssignMode={autoAssignMode}
+                      taskChatMessages={taskChatMessages}
+                      onSendTaskMessage={onSendTaskMessage}
                     />
                   ))}
                 </div>
@@ -316,6 +327,8 @@ export function TaskPanel({
                       onAssignAgent={onAssignAgent}
                       onViewDetail={handleViewDetail}
                       autoAssignMode={autoAssignMode}
+                      taskChatMessages={taskChatMessages}
+                      onSendTaskMessage={onSendTaskMessage}
                     />
                   ))}
                 </div>
@@ -356,6 +369,8 @@ export function TaskPanel({
           agentLogs={taskAgentLogs}
           interactions={taskInteractions}
           onRespondInteraction={onRespondInteraction}
+          taskChatMessages={taskChatMessages.filter(msg => msg.taskId === selectedTask.id)}
+          onSendTaskMessage={onSendTaskMessage}
         />
       )}
     </div>

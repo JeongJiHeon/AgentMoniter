@@ -23,6 +23,7 @@ import type {
   ChatMessage,
   AgentLog,
   Interaction,
+  TaskChatMessage,
 } from './types';
 import { TaskPanel } from './components/tasks/TaskPanel';
 import { saveToLocalStorage, loadFromLocalStorage } from './utils/localStorage';
@@ -190,6 +191,7 @@ function App() {
   const [isCreateAgentModalOpen, setIsCreateAgentModalOpen] = useState(false);
   const [agentLogs, setAgentLogs] = useState<AgentLog[]>([]);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
+  const [taskChatMessages, setTaskChatMessages] = useState<TaskChatMessage[]>([]);
   const [tasks, setTasks] = useState<Task[]>(() => {
     const saved = loadFromLocalStorage<Task[]>('TASKS');
     if (saved) {
@@ -323,12 +325,19 @@ function App() {
             console.log(`[WebSocket] Approval request (no options) - will be shown in ticket list only: ${payload.message}`);
           }
         } else if (message.type === 'agent_log') {
-          const payload = message.payload as AgentLog;
-          setAgentLogs(prev => [...prev, {
-            ...payload,
-            timestamp: new Date(payload.timestamp),
-          }]);
-          console.log(`[WebSocket] Agent log: ${payload.message}`);
+          const payload = message.payload as any;
+          const agentLog: AgentLog = {
+            id: payload.id || crypto.randomUUID(),
+            agentId: payload.agentId,
+            agentName: payload.agentName,
+            type: payload.type,
+            message: payload.message,
+            details: payload.details,
+            relatedTaskId: payload.relatedTaskId,
+            timestamp: typeof payload.timestamp === 'string' ? new Date(payload.timestamp) : new Date(),
+          };
+          setAgentLogs(prev => [...prev, agentLog]);
+          console.log(`[WebSocket] Agent log: ${agentLog.type} - ${agentLog.message} (${agentLog.agentName}) - Task: ${agentLog.relatedTaskId}`);
         } else if (message.type === 'interaction_created') {
           const payload = message.payload as Interaction;
           setInteractions(prev => [...prev, {
@@ -347,6 +356,51 @@ function App() {
             } : i)
           );
           console.log(`[WebSocket] Interaction responded: ${payload.id}`);
+        } else if (message.type === 'chat_message_response') {
+          // Orchestration Agent의 Chat 응답
+          const payload = message.payload as any;
+          console.log(`[WebSocket] Received chat_message_response:`, payload);
+          
+          const chatMessage: ChatMessage = {
+            id: payload.id || crypto.randomUUID(),
+            role: payload.role || 'assistant',
+            content: payload.content || '',
+            timestamp: typeof payload.timestamp === 'string' ? new Date(payload.timestamp) : new Date(),
+          };
+          
+          setChatMessages(prev => [...prev, chatMessage]);
+          console.log(`[WebSocket] Chat message added: ${chatMessage.role} - ${chatMessage.content}`);
+        } else if (message.type === 'task_interaction') {
+          const payload = message.payload as any;
+          console.log(`[WebSocket] Received task_interaction:`, payload);
+          
+          // timestamp가 문자열이면 Date로 변환, 이미 Date면 그대로 사용
+          const timestamp = typeof payload.timestamp === 'string' 
+            ? new Date(payload.timestamp) 
+            : (payload.timestamp instanceof Date ? payload.timestamp : new Date());
+          
+          const chatMessage: TaskChatMessage = {
+            id: payload.id || crypto.randomUUID(),
+            taskId: payload.taskId || payload.task_id, // 서버에서 taskId 또는 task_id로 올 수 있음
+            role: payload.role || 'agent',
+            message: payload.message || '',
+            agentId: payload.agentId || payload.agent_id,
+            agentName: payload.agentName || payload.agent_name,
+            timestamp: timestamp,
+          };
+          
+          console.log(`[WebSocket] Parsed chat message:`, chatMessage);
+          setTaskChatMessages(prev => {
+            // 중복 메시지 방지 (같은 id가 있으면 업데이트, 없으면 추가)
+            const existingIndex = prev.findIndex(msg => msg.id === chatMessage.id);
+            if (existingIndex >= 0) {
+              const updated = [...prev];
+              updated[existingIndex] = chatMessage;
+              return updated;
+            }
+            return [...prev, chatMessage];
+          });
+          console.log(`[WebSocket] Task interaction added: ${chatMessage.role} - ${chatMessage.message} (taskId: ${chatMessage.taskId})`);
         } else if (message.type === 'agent_update') {
           const payload = message.payload;
           // status를 isActive로 변환 (active면 true)
@@ -379,15 +433,19 @@ function App() {
         } else if (message.type === 'agent_response') {
           const payload = message.payload;
           console.log(`[WebSocket] Agent response from ${payload.agentName}: ${payload.message}`);
-          
-          // 챗봇 메시지로 추가
-          const chatMessage: ChatMessage = {
+
+          // Route to Agent Activity Log instead of Chat
+          // This keeps agent responses within Task context, not in Chat
+          const agentLog: AgentLog = {
             id: crypto.randomUUID(),
-            role: 'assistant',
-            content: `[${payload.agentName}]\n\n${payload.message}`,
+            agentId: payload.agentId || 'unknown',
+            agentName: payload.agentName,
+            type: 'info', // Agent responses are informational logs
+            message: payload.message,
             timestamp: new Date(payload.timestamp || Date.now()),
           };
-          setChatMessages(prev => [...prev, chatMessage]);
+          setAgentLogs(prev => [...prev, agentLog]);
+          console.log(`[WebSocket] Agent response routed to Activity Log (not Chat)`);
         }
       } catch (error) {
         console.error('[WebSocket] Failed to parse message:', error);
@@ -1148,6 +1206,66 @@ function App() {
     }
   }, []);
 
+  const handleSendTaskMessage = useCallback((taskId: string, message: string) => {
+    // Create user message locally first for immediate UI feedback
+    const userMessage: TaskChatMessage = {
+      id: crypto.randomUUID(),
+      taskId,
+      role: 'user',
+      message,
+      timestamp: new Date(),
+    };
+
+    setTaskChatMessages(prev => [...prev, userMessage]);
+
+    // Send to backend via WebSocket
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      const wsMessage = {
+        type: 'task_interaction',
+        payload: {
+          taskId,
+          role: 'user',
+          message,
+        },
+        timestamp: new Date().toISOString(),
+      };
+
+      wsRef.current.send(JSON.stringify(wsMessage));
+      console.log(`[App] Sent task_interaction message to backend:`, wsMessage);
+    } else {
+      console.warn(`[App] WebSocket not connected. Cannot send task message for task ${taskId}`);
+    }
+  }, []);
+
+  // Chat Panel용 Orchestration Agent 메시지 전송
+  const handleSendChatMessage = useCallback((message: string) => {
+    console.log(`[App] Sending chat message to Orchestration Agent: ${message}`);
+    
+    // WebSocket을 통해 Orchestration Agent에게 메시지 전송
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      const wsMessage = {
+        type: 'chat_message',
+        payload: {
+          message,
+          timestamp: new Date().toISOString(),
+        },
+        timestamp: new Date().toISOString(),
+      };
+
+      wsRef.current.send(JSON.stringify(wsMessage));
+      console.log(`[App] Sent chat_message to backend:`, wsMessage);
+    } else {
+      console.warn(`[App] WebSocket not connected. Cannot send chat message`);
+      // WebSocket 연결이 안 된 경우 에러 메시지 표시
+      setChatMessages(prev => [...prev, {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: '서버에 연결되지 않았습니다. 잠시 후 다시 시도해주세요.',
+        timestamp: new Date(),
+      }]);
+    }
+  }, []);
+
   return (
     <DashboardLayout 
       activeTab={activeTab} 
@@ -1162,6 +1280,8 @@ function App() {
           onAutoSavePersonalization={handleAutoSavePersonalization}
           externalMessages={chatMessages}
           onMessagesRead={() => setChatMessages([])}
+          onSendMessage={handleSendChatMessage}
+          useOrchestration={true}
         />
       }
     >
@@ -1264,11 +1384,13 @@ function App() {
             approvalRequests={approvalQueue}
             agentLogs={agentLogs}
             interactions={interactions}
+            taskChatMessages={taskChatMessages}
             onCreateTask={handleCreateTask}
             onUpdateTask={handleUpdateTask}
             onDeleteTask={handleDeleteTask}
             onAssignAgent={handleAssignAgent}
             onRespondInteraction={handleRespondInteraction}
+            onSendTaskMessage={handleSendTaskMessage}
             availableMCPs={settings.mcpServices}
             llmConfig={settings.llmConfig}
             autoAssignMode={autoAssignMode}

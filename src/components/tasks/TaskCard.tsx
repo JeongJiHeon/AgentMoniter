@@ -1,7 +1,8 @@
 import React from 'react';
 import type { Task, TaskStatus, TaskPriority } from '../../types/task';
-import type { Agent } from '../../types';
+import type { Agent, TaskChatMessage } from '../../types';
 import { AssignAgentModal } from './AssignAgentModal';
+import { TaskChatDrawer } from './TaskChatDrawer';
 
 interface TaskCardProps {
   task: Task;
@@ -12,6 +13,8 @@ interface TaskCardProps {
   onAssignAgent?: (taskId: string, agentId: string) => void;
   onViewDetail?: (taskId: string) => void;
   autoAssignMode?: 'global' | 'manual';
+  taskChatMessages?: TaskChatMessage[];
+  onSendTaskMessage?: (taskId: string, message: string) => void;
 }
 
 const priorityColors: Record<TaskPriority, string> = {
@@ -50,11 +53,15 @@ const getActionMessage = (task: Task, assignedAgent?: Agent, allAgents?: Agent[]
   return 'Unknown status';
 };
 
-export function TaskCard({ task, agents, onStatusChange, onUpdate, onDelete, onAssignAgent, onViewDetail, autoAssignMode = 'manual' }: TaskCardProps) {
+export function TaskCard({ task, agents, onStatusChange, onUpdate, onDelete, onAssignAgent, onViewDetail, autoAssignMode = 'manual', taskChatMessages = [], onSendTaskMessage }: TaskCardProps) {
   const [showAssignModal, setShowAssignModal] = React.useState(false);
+  const [showChatDrawer, setShowChatDrawer] = React.useState(false);
 
   const assignedAgent = agents.find(a => a.id === task.assignedAgentId);
   const actionMessage = getActionMessage(task, assignedAgent, agents);
+
+  // Filter chat messages for this task
+  const taskMessages = taskChatMessages.filter(msg => msg.taskId === task.id);
 
   const handleAssign = (agentId: string) => {
     if (onAssignAgent) {
@@ -113,6 +120,23 @@ export function TaskCard({ task, agents, onStatusChange, onUpdate, onDelete, onA
 
           {/* Action Buttons */}
           <div className="flex items-center gap-2">
+            {onSendTaskMessage && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowChatDrawer(true);
+                }}
+                className="px-3 py-1.5 bg-slate-600 hover:bg-slate-500 text-white text-xs font-medium rounded transition-colors flex items-center gap-1"
+                title="Chat with agent about this task"
+              >
+                💬 Chat
+                {taskMessages.length > 0 && (
+                  <span className="ml-1 px-1.5 py-0.5 bg-blue-500 text-white text-xs rounded-full">
+                    {taskMessages.length}
+                  </span>
+                )}
+              </button>
+            )}
             {onViewDetail && (
               <button
                 onClick={(e) => {
@@ -197,6 +221,16 @@ export function TaskCard({ task, agents, onStatusChange, onUpdate, onDelete, onA
         agents={agents}
         taskTitle={task.title}
       />
+
+      {onSendTaskMessage && (
+        <TaskChatDrawer
+          isOpen={showChatDrawer}
+          onClose={() => setShowChatDrawer(false)}
+          task={task}
+          messages={taskMessages}
+          onSendMessage={onSendTaskMessage}
+        />
+      )}
     </div>
   );
 }

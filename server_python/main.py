@@ -43,6 +43,7 @@ app.add_middleware(
 # 전역 변수
 ws_server: Optional[AgentMonitorWebSocketServer] = None
 slack_webhook_service: Optional[SlackWebhookService] = None
+answer_agent = None  # Answer Agent (대시보드 미표시, 내부용)
 
 
 # 간단한 데모 Agent 구현
@@ -180,92 +181,76 @@ class DemoAgent:
         self._emit_state_change()
 
     async def process(self, input_data):
-        """Task 처리"""
+        """Task 처리 - Planning 기반으로 여러 Agent 호출 가능"""
         from models.ticket import Ticket, TicketStatus, TicketOption, CreateTicketInput
         from models.approval import ApprovalRequest, ApprovalRequestType
         from agents.types import AgentOutput
         from uuid import uuid4
         from datetime import datetime
 
-        # AgentInput에서 task_id 추출 (metadata에서 가져오거나 input_data에서 직접)
+        # AgentInput에서 task_id 추출
         task_id = getattr(input_data, 'task_id', None) or input_data.metadata.get('task_id', '')
-        print(f"[DemoAgent {self.name}] Processing task: {task_id}")
+        print(f"[DemoAgent {self.name}] Processing task with Planning: {task_id}")
 
-        # 1. Thinking mode를 exploring으로 변경
+        # 1. Planning Phase - 어떤 Agent들이 필요한지 분석
         from models.agent import ThinkingMode, AgentStatus
         self._state.thinkingMode = ThinkingMode.EXPLORING
         self._state.currentTaskId = task_id
         self._state.currentTaskDescription = input_data.metadata.get('title', '')
         self._state.status = AgentStatus.ACTIVE
         self._emit_state_change()
+        
+        print(f"[DemoAgent {self.name}] Planning phase: Analyzing task requirements...")
+        # TODO: LLM을 사용하여 실제 Planning 수행
+        # 현재는 간단한 키워드 기반 분석
+        task_content = input_data.content.lower()
+        task_title = input_data.metadata.get('title', '').lower()
+        
+        # 필요한 Agent 타입 결정 (Planning 결과)
+        required_agents = []
+        if any(kw in task_content or kw in task_title for kw in ['email', 'mail', '이메일', '메일']):
+            required_agents.append('email-handler')
+        if any(kw in task_content or kw in task_title for kw in ['document', 'doc', '문서', '파일']):
+            required_agents.append('document-processor')
+        if any(kw in task_content or kw in task_title for kw in ['research', '연구', '조사']):
+            required_agents.append('research-assistant')
+        if any(kw in task_content or kw in task_title for kw in ['schedule', 'calendar', '일정', '스케줄']):
+            required_agents.append('schedule-manager')
+        
+        # Agent가 지정되지 않은 경우 기본 처리
+        if not required_agents:
+            required_agents = ['task-coordinator']
+        
+        print(f"[DemoAgent {self.name}] Planning result: Required agents = {required_agents}")
+        
         await asyncio.sleep(1)
 
-        # 2. Ticket 생성
-        print(f"[DemoAgent {self.name}] Creating ticket...")
-        from models.agent import ThinkingMode
+        # 2. Structuring Phase - 실행 계획 수립
         self._state.thinkingMode = ThinkingMode.STRUCTURING
         self._emit_state_change()
-
-        ticket = Ticket(
-            id=str(uuid4()),
-            agentId=self._id,
-            purpose=f"Process: {input_data.metadata.get('title', 'Task')}",
-            content=input_data.content,
-            context=json.dumps({
-                "what": f"Task processing for {input_data.metadata.get('title')}",
-                "why": "User requested task execution",
-                "when": datetime.now().isoformat(),
-                "where": "Agent Monitor System",
-                "who": self.name,
-                "how": "Automated processing"
-            }),
-            decisionRequired="Should I proceed with this task?",
-            options=[
-                TicketOption(
-                    id="approve",
-                    label="Approve and Execute",
-                    description="Proceed with task execution",
-                    isRecommended=True
-                ),
-                TicketOption(
-                    id="reject",
-                    label="Reject",
-                    description="Cancel task execution",
-                    isRecommended=False
-                )
-            ],
-            executionPlan="1. Analyze task requirements\n2. Execute task steps\n3. Report results",
-            status=TicketStatus.PENDING_APPROVAL,
-            priority=input_data.metadata.get('priority', 'medium'),
-            createdAt=datetime.now(),
-            updatedAt=datetime.now()
-        )
-
+        
+        execution_plan = f"Planning: {len(required_agents)} agent(s) required\n"
+        for i, agent_type in enumerate(required_agents, 1):
+            execution_plan += f"{i}. Use {agent_type} agent\n"
+        execution_plan += f"{len(required_agents) + 1}. Integrate results\n"
+        execution_plan += f"{len(required_agents) + 2}. Report to user"
+        
+        print(f"[DemoAgent {self.name}] Execution plan:\n{execution_plan}")
+        
         await asyncio.sleep(1)
 
-        # 3. Approval Request 생성
-        print(f"[DemoAgent {self.name}] Requesting approval...")
-        from models.agent import ThinkingMode
+        # 3. Validation Phase - 선택적으로 승인 요청
         self._state.thinkingMode = ThinkingMode.VALIDATING
         self._emit_state_change()
-
-        approval = ApprovalRequest(
-            id=str(uuid4()),
-            ticketId=ticket.id,
-            agentId=self._id,
-            type=ApprovalRequestType.PROCEED,
-            message=f"Approve task execution: {input_data.metadata.get('title')}?",
-            context=input_data.content,
-            options=ticket.options,
-            status="pending",
-            priority=1,
-            createdAt=datetime.now()
-        )
-
+        
+        # 우선순위가 높거나 긴급한 경우만 승인 요청
+        requires_approval = input_data.metadata.get('priority') in ['high', 'urgent']
+        
+        print(f"[DemoAgent {self.name}] Validation: requires_approval = {requires_approval}")
+        
         await asyncio.sleep(1)
 
-        # 4. 완료
-        from models.agent import ThinkingMode
+        # 4. Execution Phase (승인 후 실행 또는 바로 실행)
         self._state.thinkingMode = ThinkingMode.SUMMARIZING
         self._emit_state_change()
         await asyncio.sleep(1)
@@ -278,38 +263,64 @@ class DemoAgent:
 
         print(f"[DemoAgent {self.name}] Task processing complete!")
 
-        # AgentOutput 형식으로 반환
-        from agents.types import AgentOutput, CreateTicketInput
-        ticket_input = CreateTicketInput(
-            purpose=ticket.purpose,
-            content=ticket.content,
-            context=ticket.context,
-            decisionRequired=ticket.decisionRequired,
-            options=ticket.options,
-            executionPlan=ticket.executionPlan,
-            priority=ticket.priority,
-            requiresApproval=ticket.requiresApproval,
-            estimatedDuration=ticket.estimatedDuration,
-            dependencies=ticket.dependencies
-        )
+        # 승인이 필요한 경우에만 티켓/승인 생성
+        tickets = []
+        approval_requests = []
         
-        approval_dict = {
-            "id": approval.id,
-            "ticketId": approval.ticketId,
-            "agentId": approval.agentId,
-            "type": approval.type.value if hasattr(approval.type, 'value') else str(approval.type),
-            "message": approval.message,
-            "context": approval.context,
-            "options": [opt.model_dump(mode="json") if hasattr(opt, 'model_dump') else opt for opt in (approval.options or [])],
-            "status": approval.status.value if hasattr(approval.status, 'value') else str(approval.status),
-            "priority": approval.priority,
-            "createdAt": approval.createdAt.isoformat() if hasattr(approval.createdAt, 'isoformat') else str(approval.createdAt)
-        }
+        if requires_approval:
+            # 티켓 생성
+            ticket_input = CreateTicketInput(
+                purpose=f"Multi-Agent Task: {input_data.metadata.get('title', 'Task')}",
+                content=input_data.content,
+                context=json.dumps({
+                    "what": f"Task processing with {len(required_agents)} agents",
+                    "required_agents": required_agents,
+                    "execution_plan": execution_plan
+                }),
+                decisionRequired="Proceed with multi-agent execution?",
+                options=[
+                    TicketOption(
+                        id="approve",
+                        label="Approve and Execute",
+                        description="Proceed with task execution",
+                        isRecommended=True
+                    ),
+                    TicketOption(
+                        id="reject",
+                        label="Reject",
+                        description="Cancel task execution",
+                        isRecommended=False
+                    )
+                ],
+                executionPlan=execution_plan,
+                priority=input_data.metadata.get('priority', 'medium')
+            )
+            tickets.append(ticket_input)
+            
+            # 승인 요청 생성
+            approval_dict = {
+                "id": str(uuid4()),
+                "ticketId": str(uuid4()),
+                "agentId": self._id,
+                "type": "proceed",
+                "message": f"Approve multi-agent execution for: {input_data.metadata.get('title')}?",
+                "context": input_data.content,
+                "options": [
+                    {"id": "approve", "label": "Approve and Execute", "description": "Proceed with task execution", "isRecommended": True},
+                    {"id": "reject", "label": "Reject", "description": "Cancel task execution", "isRecommended": False}
+                ],
+                "status": "pending",
+                "priority": 1,
+                "createdAt": datetime.now().isoformat()
+            }
+            approval_requests.append(approval_dict)
 
+        # AgentOutput 반환 (승인이 필요하지 않으면 빈 리스트)
+        from agents.types import AgentOutput
         return AgentOutput(
-            tickets=[ticket_input],
-            approval_requests=[approval_dict],
-            logs=[{"level": "info", "message": f"Processed task: {task_id}"}]
+            tickets=tickets,
+            approval_requests=approval_requests,
+            logs=[{"level": "info", "message": f"Processed task with {len(required_agents)} agent(s): {task_id}"}]
         )
 
     def _emit_state_change(self):
@@ -330,16 +341,212 @@ async def create_demo_agent(config, agent_id=None):
 
 
 async def process_agent_task(agent, agent_input):
-    """Agent Task 처리"""
+    """Agent Task 처리 - 멀티-에이전트 Planning 포함"""
     try:
         print(f"[Server] Starting task processing for agent {agent.name}")
         
         # Agent 상태 업데이트: currentTaskId 설정
         task_id = agent_input.metadata.get('task_id', '')
+        task_title = agent_input.metadata.get('title', '')
+        task_content = agent_input.content or task_title
+        
+        # =====================================================
+        # 🆕 MULTI-AGENT PLANNING
+        # =====================================================
+        all_agents = agent_registry.get_all_agents()
+        task_lower = task_content.lower()
+        
+        # 키워드 매핑으로 필요한 Agent 목록 결정
+        keywords_map = {
+            'menu': {
+                'keywords': ['메뉴', '음식', '점심', '저녁', '추천', 'menu', 'food', 'lunch', 'dinner'],
+                'priority': 1,
+                'description': '메뉴 추천'
+            },
+            'reservation': {
+                'keywords': ['예약', '예매', 'reservation', 'book', 'reserve'],
+                'priority': 2,
+                'description': '장소/식당 예약'
+            },
+            'schedule': {
+                'keywords': ['일정', '스케줄', 'schedule', 'calendar'],
+                'priority': 3,
+                'description': '일정 관리'
+            },
+        }
+        
+        # 메시지에서 필요한 작업 유형 추출
+        required_tasks = []
+        for key, config in keywords_map.items():
+            if any(kw in task_lower for kw in config['keywords']):
+                required_tasks.append({
+                    'type': key,
+                    'priority': config['priority'],
+                    'description': config['description']
+                })
+        
+        # 우선순위로 정렬
+        required_tasks.sort(key=lambda x: x['priority'])
+        
+        # 필요한 Agent 매칭 (현재 할당된 Agent도 포함)
+        execution_plan = []
+        for task_info in required_tasks:
+            task_type = task_info['type']
+            for ag in all_agents:
+                # 모든 Agent 검색 (현재 Agent 포함)
+                agent_name_lower = ag.name.lower()
+                if task_type in agent_name_lower or any(kw in agent_name_lower for kw in keywords_map[task_type]['keywords'][:2]):
+                    # 중복 방지
+                    if not any(p['agent'].id == ag.id for p in execution_plan):
+                        execution_plan.append({
+                            'agent': ag,
+                            'task_type': task_type,
+                            'description': task_info['description']
+                        })
+                    break
+        
+        # 디버그 로그
+        print(f"[Server] Planning: required_tasks={[t['type'] for t in required_tasks]}, execution_plan={[p['agent'].name for p in execution_plan]}")
+        
+        # 멀티-에이전트 실행이 필요한 경우
+        if len(execution_plan) > 1:
+            print(f"[Server] Multi-agent planning: {len(execution_plan)} agents required")
+            
+            # 📝 로그: Planning 시작
+            ws_server.broadcast_agent_log(
+                agent_id=agent.id,
+                agent_name=agent.name,
+                log_type="info",
+                message=f"🔍 Planning: 요청 분석 중...",
+                details=f"Task: {task_title}",
+                task_id=task_id
+            )
+            
+            # 실행 계획 로그
+            plan_details = "\n".join([
+                f"  Step {i+1}: {item['agent'].name} ({item['description']})"
+                for i, item in enumerate(execution_plan)
+            ])
+            ws_server.broadcast_agent_log(
+                agent_id=agent.id,
+                agent_name=agent.name,
+                log_type="decision",
+                message=f"📋 실행 계획 수립 ({len(execution_plan)}개 Agent)",
+                details=f"실행 순서:\n{plan_details}",
+                task_id=task_id
+            )
+            
+            # 각 Agent 순차 실행
+            agent_results = []
+            for step_num, plan_item in enumerate(execution_plan, 1):
+                specialist = plan_item['agent']
+                task_desc = plan_item['description']
+                
+                # Step 시작 로그
+                ws_server.broadcast_agent_log(
+                    agent_id=agent.id,
+                    agent_name=agent.name,
+                    log_type="info",
+                    message=f"▶️ Step {step_num}/{len(execution_plan)}: {specialist.name} 호출",
+                    details=f"작업: {task_desc}",
+                    task_id=task_id
+                )
+                
+                # Agent 작업 시작 로그
+                ws_server.broadcast_agent_log(
+                    agent_id=specialist.id,
+                    agent_name=specialist.name,
+                    log_type="info",
+                    message=f"🔧 작업 시작: {task_desc}",
+                    details=f"요청: {task_content[:50]}...",
+                    task_id=task_id
+                )
+                
+                await asyncio.sleep(0.3)  # 시각화용 딜레이
+                
+                # 결과 생성
+                if plan_item['task_type'] == 'menu':
+                    result_text = "🍽️ 추천 메뉴: 비빔밥, 파스타, 초밥"
+                elif plan_item['task_type'] == 'reservation':
+                    result_text = "📍 근처 식당 예약 가능 확인"
+                else:
+                    result_text = f"✅ {task_desc} 완료"
+                
+                agent_results.append({
+                    'agent': specialist.name,
+                    'task': task_desc,
+                    'result': result_text
+                })
+                
+                # 작업 완료 로그
+                ws_server.broadcast_agent_log(
+                    agent_id=specialist.id,
+                    agent_name=specialist.name,
+                    log_type="info",
+                    message=f"✅ 작업 완료: {result_text}",
+                    details="다음 단계로 전달",
+                    task_id=task_id
+                )
+            
+            # Answer Agent로 최종 응답
+            ws_server.broadcast_agent_log(
+                agent_id=answer_agent.id,
+                agent_name=answer_agent.name,
+                log_type="info",
+                message="📝 최종 답변 생성 중...",
+                details=f"종합할 결과: {len(agent_results)}개",
+                task_id=task_id
+            )
+            
+            # 최종 답변 생성
+            final_answer = f"'{task_title}'에 대해 처리했습니다.\n\n"
+            final_answer += "📊 **처리 결과**\n\n"
+            for i, res in enumerate(agent_results, 1):
+                final_answer += f"**Step {i}. {res['agent']}**\n   └ {res['result']}\n\n"
+            final_answer += "모든 작업이 완료되었습니다! 😊"
+            
+            # Answer Agent 응답 브로드캐스트
+            ws_server.broadcast_task_interaction(
+                task_id=task_id,
+                role='agent',
+                message=final_answer,
+                agent_id=answer_agent.id,
+                agent_name=answer_agent.name
+            )
+            
+            # 완료 로그
+            agent_names = " → ".join([item['agent'].name for item in execution_plan])
+            ws_server.broadcast_agent_log(
+                agent_id=agent.id,
+                agent_name=agent.name,
+                log_type="info",
+                message=f"🎉 Task 완료",
+                details=f"실행 흐름: {agent_names} → Answer Agent",
+                task_id=task_id
+            )
+            
+            # 멀티-에이전트 처리 완료 - 기존 로직 스킵
+            print(f"[Server] Multi-agent task completed for task {task_id}")
+            return  # 여기서 종료
+        
+        # =====================================================
+        # 단일 Agent 처리 (기존 로직)
+        # =====================================================
+        
+        # 📝 로그: Task 처리 시작
+        ws_server.broadcast_agent_log(
+            agent_id=agent.id,
+            agent_name=agent.name,
+            log_type="info",
+            message=f"Task 처리 시작: {task_title[:50]}{'...' if len(task_title) > 50 else ''}",
+            details=f"Agent: {agent.name}, Task ID: {task_id}",
+            task_id=task_id
+        )
+        
         if hasattr(agent, 'get_state'):
             state = agent.get_state()
             state.currentTaskId = task_id
-            state.currentTaskDescription = agent_input.metadata.get('title', '')
+            state.currentTaskDescription = task_title
             if hasattr(agent, '_emit_state_change'):
                 agent._emit_state_change()
         
@@ -426,6 +633,16 @@ async def process_agent_task(agent, agent_input):
                 )
                 processed_ticket_ids.add(ticket.id)
                 
+                # 📝 로그: Ticket 생성
+                ws_server.broadcast_agent_log(
+                    agent_id=agent.id,
+                    agent_name=agent.name,
+                    log_type="info",
+                    message=f"Ticket 생성: {ticket.purpose[:50]}{'...' if len(ticket.purpose) > 50 else ''}",
+                    details=f"Ticket ID: {ticket.id}, Priority: {ticket.priority}",
+                    task_id=task_id
+                )
+                
                 # 옵션이 있는지 확인 (approval.options 또는 ticket.options)
                 has_options = False
                 if approval.type == ApprovalRequestType.SELECT_OPTION:
@@ -446,12 +663,34 @@ async def process_agent_task(agent, agent_input):
                             approval.options = [{"id": opt.id, "label": opt.label, "description": opt.description, "isRecommended": opt.isRecommended} for opt in ticket.options] if ticket.options else []
                     
                     print(f"[Server] Broadcasting approval_request (with options): {approval.id}, ticketId: {ticket.id}, options count: {len(approval.options) if approval.options else 0}")
+                    
+                    # 📝 로그: Approval 요청 (옵션 있음)
+                    ws_server.broadcast_agent_log(
+                        agent_id=agent.id,
+                        agent_name=agent.name,
+                        log_type="decision",
+                        message=f"승인 요청: {approval.message[:50]}{'...' if len(approval.message) > 50 else ''}",
+                        details=f"Type: {approval.type}, Options: {len(approval.options) if approval.options else 0}개",
+                        task_id=task_id
+                    )
+                    
                     ws_server.broadcast_approval_request(approval)
                     broadcasted_approval = True
                     # 티켓은 생성하되, 티켓 목록에는 추가하지 않음 (승인 대기에서만 표시)
                 else:
                     # 옵션이 없는 경우: 티켓 목록에 추가
                     print(f"[Server] Broadcasting ticket_created (no options): {ticket.id}")
+                    
+                    # 📝 로그: Ticket 브로드캐스트
+                    ws_server.broadcast_agent_log(
+                        agent_id=agent.id,
+                        agent_name=agent.name,
+                        log_type="info",
+                        message=f"Ticket 대기 중: {ticket.purpose[:50]}{'...' if len(ticket.purpose) > 50 else ''}",
+                        details=f"승인 대기 상태로 전환됨",
+                        task_id=task_id
+                    )
+                    
                     ws_server.broadcast_ticket_created(ticket)
                     broadcasted_ticket = True
             else:
@@ -540,6 +779,16 @@ async def process_agent_task(agent, agent_input):
                     print(f"[Server] FALLBACK: Broadcasting ticket_created: {ticket.id}")
                     ws_server.broadcast_ticket_created(ticket)
         
+        # 📝 로그: Task 처리 완료
+        ws_server.broadcast_agent_log(
+            agent_id=agent.id,
+            agent_name=agent.name,
+            log_type="info",
+            message=f"Task 처리 완료: {task_title[:50]}{'...' if len(task_title) > 50 else ''}",
+            details=f"Tickets: {len(tickets)}, Approvals: {len(approvals)}",
+            task_id=task_id
+        )
+        
         # Agent 상태 업데이트: 작업 완료 후에도 ACTIVE 유지 (다음 작업 대기)
         if hasattr(agent, 'get_state'):
             state = agent.get_state()
@@ -557,6 +806,16 @@ async def process_agent_task(agent, agent_input):
         import traceback
         traceback.print_exc()
         
+        # 📝 로그: Task 처리 에러
+        ws_server.broadcast_agent_log(
+            agent_id=agent.id,
+            agent_name=agent.name,
+            log_type="error",
+            message=f"Task 처리 중 오류 발생: {str(e)[:50]}{'...' if len(str(e)) > 50 else ''}",
+            details=traceback.format_exc(),
+            task_id=task_id if 'task_id' in locals() else None
+        )
+        
         # 에러 발생 시 Agent 상태 리셋
         if hasattr(agent, 'get_state'):
             state = agent.get_state()
@@ -567,6 +826,8 @@ async def process_agent_task(agent, agent_input):
 
 
 async def main():
+    global answer_agent
+    
     print("=" * 50)
     print("Agent Monitor Server Starting...")
     print("=" * 50)
@@ -711,25 +972,27 @@ async def main():
 
 위 메뉴 중에서 선택해주시면 더 자세한 정보를 제공해드리겠습니다!"""
                 
-                # 결과를 WebSocket으로 브로드캐스트 (챗봇 메시지로)
-                # ws_server는 main 함수의 로컬 변수로 클로저로 캡처됨
+                # 결과를 WebSocket으로 브로드캐스트 (task_interaction 타입으로)
+                # Approval 응답은 System Notification으로 전송 (Task Chat 혼동 방지)
                 try:
                     if ws_server:
-                        from websocket.websocket_server import WebSocketMessage
-                        from models.websocket import WebSocketMessageType
-                        ws_server._broadcast(WebSocketMessage(
-                            type=WebSocketMessageType.AGENT_RESPONSE,
-                            payload={
-                                "agentId": self.id,
-                                "agentName": self.name,
-                                "ticketId": approval.ticketId,
-                                "message": result_message,
-                                "timestamp": datetime.now().isoformat()
-                            }
-                        ))
-                except NameError:
-                    # ws_server가 아직 초기화되지 않은 경우
-                    pass
+                        ws_server.broadcast_notification(
+                            f"Ticket approved: {result_message[:100]}",
+                            "success"
+                        )
+                        # Agent Activity 로그에도 기록
+                        ws_server.broadcast_agent_log(
+                            agent_id=self.id,
+                            agent_name=self.name,
+                            log_type="info",
+                            message=f"Ticket 승인됨: {approval.ticketId}",
+                            details=f"처리 결과:\n{result_message}"
+                        )
+                        print(f"[Server] Approval result broadcasted as notification and logged")
+                except (NameError, Exception) as e:
+                    print(f"[Server] ERROR broadcasting approval notification: {e}")
+                    import traceback
+                    traceback.print_exc()
                 
                 # Agent 상태 리셋: 작업 완료 후 IDLE 상태로 변경
                 # 주의: 작업이 완료되어도 다른 작업이 대기 중일 수 있으므로
@@ -763,24 +1026,26 @@ async def main():
                 """거부 처리"""
                 self.log("info", f"Task rejected for ticket {approval.ticketId}")
                 
-                # ws_server는 main 함수의 로컬 변수로 클로저로 캡처됨
+                # Rejection 응답도 System Notification으로 전송
                 try:
                     if ws_server:
-                        from websocket.websocket_server import WebSocketMessage
-                        from models.websocket import WebSocketMessageType
-                        ws_server._broadcast(WebSocketMessage(
-                            type=WebSocketMessageType.AGENT_RESPONSE,
-                            payload={
-                                "agentId": self.id,
-                                "agentName": self.name,
-                                "ticketId": approval.ticketId,
-                                "message": f"작업이 거부되었습니다. Ticket {approval.ticketId}의 실행이 취소되었습니다.",
-                                "timestamp": datetime.now().isoformat()
-                            }
-                        ))
+                        ws_server.broadcast_notification(
+                            f"Ticket rejected: {approval.ticketId} 실행이 취소되었습니다.",
+                            "warning"
+                        )
+                        # Agent Activity 로그에도 기록
+                        ws_server.broadcast_agent_log(
+                            agent_id=self.id,
+                            agent_name=self.name,
+                            log_type="warning",
+                            message=f"Ticket 거부됨: {approval.ticketId}",
+                            details="사용자가 작업 실행을 거부했습니다."
+                        )
+                        print(f"[Server] Rejection broadcasted as notification and logged")
                 except (NameError, Exception) as e:
-                    # ws_server가 아직 초기화되지 않은 경우 또는 기타 에러
-                    print(f"[Server] ERROR broadcasting rejection response: {e}")
+                    print(f"[Server] ERROR broadcasting rejection notification: {e}")
+                    import traceback
+                    traceback.print_exc()
                 
                 # Agent 상태 리셋: 거부 후에도 ACTIVE 유지 (다음 작업 대기)
                 try:
@@ -849,6 +1114,24 @@ async def main():
         print(f"[Server] Restored {restored_count}/{len(saved_agents)} agents successfully")
     else:
         print("[Server] No saved agents found")
+    
+    # 0.5. Answer Agent 생성 (대시보드 미표시, 시스템 내부용)
+    print("\n[0.5/4] Creating Answer Agent (internal use only)...")
+    answer_agent_config = AgentConfig(
+        name="Answer Agent",
+        type="system",
+        description="Internal agent for generating final answers. Not displayed on dashboard.",
+        custom_config={
+            "llm": {
+                "provider": "anthropic",
+                "model": "claude-3-5-sonnet-20241022",
+                "temperature": 0.7,
+                "max_tokens": 2000
+            }
+        }
+    )
+    answer_agent = TaskProcessorAgent(answer_agent_config, agent_id="answer-agent-system")
+    print(f"[Server] Answer Agent created (ID: {answer_agent.id}) - Not registered in agent_registry")
     
     # 1. MCP 서비스 등록
     print("\n[1/4] Registering MCP Services...")
@@ -1148,24 +1431,26 @@ async def main():
 위 메뉴 중에서 선택해주시면 더 자세한 정보를 제공해드리겠습니다!"""
                         
                         # 결과를 WebSocket으로 브로드캐스트 (챗봇 메시지로)
-                        # ws_server는 main 함수의 로컬 변수로 클로저로 캡처됨
+                        # Approval 응답은 System Notification으로 전송
                         try:
                             if ws_server:
-                                from websocket.websocket_server import WebSocketMessage
-                                from models.websocket import WebSocketMessageType
-                                ws_server._broadcast(WebSocketMessage(
-                                    type=WebSocketMessageType.AGENT_RESPONSE,
-                                    payload={
-                                        "agentId": self.id,
-                                        "agentName": self.name,
-                                        "ticketId": approval.ticketId,
-                                        "message": result_message,
-                                        "timestamp": datetime.now().isoformat()
-                                    }
-                                ))
+                                ws_server.broadcast_notification(
+                                    f"Agent created and approved: {result_message[:100]}",
+                                    "success"
+                                )
+                                # Agent Activity 로그에도 기록
+                                ws_server.broadcast_agent_log(
+                                    agent_id=self.id,
+                                    agent_name=self.name,
+                                    log_type="info",
+                                    message=f"Agent 생성 승인됨: {approval.ticketId}",
+                                    details=f"처리 결과:\n{result_message}"
+                                )
+                                print(f"[Server] Agent creation approval broadcasted as notification and logged")
                         except (NameError, Exception) as e:
-                            # ws_server가 아직 초기화되지 않은 경우 또는 기타 에러
-                            print(f"[Server] ERROR broadcasting agent response (CREATE_AGENT): {e}")
+                            print(f"[Server] ERROR broadcasting agent creation notification: {e}")
+                            import traceback
+                            traceback.print_exc()
                         
                         # Agent 상태 리셋: 작업 완료 후에도 ACTIVE 유지 (다음 작업 대기)
                         try:
@@ -1194,24 +1479,26 @@ async def main():
                         """거부 처리"""
                         self.log("info", f"Task rejected for ticket {approval.ticketId}")
                         
-                        # ws_server는 main 함수의 로컬 변수로 클로저로 캡처됨
+                        # Rejection 응답도 System Notification으로 전송
                         try:
                             if ws_server:
-                                from websocket.websocket_server import WebSocketMessage
-                                from models.websocket import WebSocketMessageType
-                                ws_server._broadcast(WebSocketMessage(
-                                    type=WebSocketMessageType.AGENT_RESPONSE,
-                                    payload={
-                                        "agentId": self.id,
-                                        "agentName": self.name,
-                                        "ticketId": approval.ticketId,
-                                        "message": f"작업이 거부되었습니다. Ticket {approval.ticketId}의 실행이 취소되었습니다.",
-                                        "timestamp": datetime.now().isoformat()
-                                    }
-                                ))
+                                ws_server.broadcast_notification(
+                                    f"Agent creation rejected: Ticket {approval.ticketId} 실행이 취소되었습니다.",
+                                    "warning"
+                                )
+                                # Agent Activity 로그에도 기록
+                                ws_server.broadcast_agent_log(
+                                    agent_id=self.id,
+                                    agent_name=self.name,
+                                    log_type="warning",
+                                    message=f"Agent 생성 거부됨: {approval.ticketId}",
+                                    details="사용자가 Agent 생성을 거부했습니다."
+                                )
+                                print(f"[Server] Agent creation rejection broadcasted as notification and logged")
                         except (NameError, Exception) as e:
-                            # ws_server가 아직 초기화되지 않은 경우 또는 기타 에러
-                            print(f"[Server] ERROR broadcasting rejection response (CREATE_AGENT): {e}")
+                            print(f"[Server] ERROR broadcasting rejection notification: {e}")
+                            import traceback
+                            traceback.print_exc()
                         
                         # Agent 상태 리셋: 거부 후에도 ACTIVE 유지 (다음 작업 대기)
                         try:
@@ -1545,6 +1832,415 @@ async def main():
                 print(f"[Server] ERROR broadcasting option selection notification: {e}")
             
             print(f"[Server] Option selection processed for ticket {ticket_id}")
+        
+        elif message.type == WebSocketMessageType.TASK_INTERACTION_CLIENT:
+            # Task 상호작용 메시지 처리 (사용자가 Chat에서 메시지 전송)
+            # 항상 Orchestration Agent가 응답하고, 필요시 다른 Agent를 호출
+            payload = message.payload
+            task_id = payload.get('taskId')
+            user_message = payload.get('message')
+            role = payload.get('role', 'user')
+            
+            print(f"[Server] Processing task_interaction: taskId={task_id}, role={role}, message={user_message[:50]}...")
+            
+            # Orchestration Agent 찾기
+            orchestration_agent = None
+            all_agents = agent_registry.get_all_agents()
+            
+            # Orchestration Agent 찾기: name이나 type에 "orchestration"이 포함된 경우
+            for agent in all_agents:
+                agent_name_lower = agent.name.lower()
+                agent_type_lower = agent.type.lower() if hasattr(agent, 'type') else ''
+                state = agent.get_state()
+                
+                # name이나 type에 "orchestration"이 포함되어 있거나, description에 포함된 경우
+                if ('orchestration' in agent_name_lower or 
+                    'orchestration' in agent_type_lower or
+                    (hasattr(state, 'description') and state.description and 'orchestration' in state.description.lower())):
+                    orchestration_agent = agent
+                    break
+            
+            # Orchestration Agent를 찾지 못한 경우, 첫 번째 활성 Agent를 사용하거나 새로 생성
+            if not orchestration_agent:
+                print(f"[Server] WARNING: Orchestration Agent not found, using first available agent")
+                if len(all_agents) > 0:
+                    orchestration_agent = all_agents[0]
+                    print(f"[Server] Using first available agent: {orchestration_agent.name} ({orchestration_agent.id})")
+                else:
+                    print(f"[Server] ERROR: No agents available")
+                    if ws_server:
+                        ws_server.broadcast_task_interaction(
+                            task_id=task_id,
+                            role='system',
+                            message=f"사용 가능한 Agent가 없습니다. 먼저 Agent를 생성해주세요.",
+                            agent_id=None,
+                            agent_name="System"
+                        )
+                    return
+            
+            print(f"[Server] Using Orchestration Agent: {orchestration_agent.name} ({orchestration_agent.id})")
+            
+            # Agent 로그: Task 처리 시작
+            if ws_server:
+                ws_server.broadcast_agent_log(
+                    agent_id=orchestration_agent.id,
+                    agent_name=orchestration_agent.name,
+                    log_type='info',
+                    message=f"Task 처리 시작: {user_message[:50]}...",
+                    details=f"Task ID: {task_id}\n전체 메시지: {user_message}",
+                    task_id=task_id
+                )
+            
+            # 🆕 MULTI-AGENT ORCHESTRATION: Step-by-Step 순차 실행
+            try:
+                user_message_lower = user_message.lower()
+                
+                # Agent 로그: Planning 시작
+                if ws_server:
+                    ws_server.broadcast_agent_log(
+                        agent_id=orchestration_agent.id,
+                        agent_name=orchestration_agent.name,
+                        log_type='info',
+                        message="🔍 Planning: 요청 분석 및 실행 계획 수립 중...",
+                        details=f"요청: {user_message}",
+                        task_id=task_id
+                    )
+                
+                # =====================================================
+                # STEP 1: 요청 분석 - 필요한 Agent 목록 결정 (순서 포함)
+                # =====================================================
+                keywords_map = {
+                    'menu': {
+                        'keywords': ['메뉴', '음식', '점심', '저녁', '추천', 'menu', 'food', 'lunch', 'dinner'],
+                        'priority': 1,  # 낮은 숫자 = 먼저 실행
+                        'description': '메뉴 추천'
+                    },
+                    'reservation': {
+                        'keywords': ['예약', '예매', 'reservation', 'book', 'reserve'],
+                        'priority': 2,
+                        'description': '장소/식당 예약'
+                    },
+                    'schedule': {
+                        'keywords': ['일정', '스케줄', 'schedule', 'calendar'],
+                        'priority': 3,
+                        'description': '일정 관리'
+                    },
+                    'email': {
+                        'keywords': ['이메일', '메일', 'email', 'mail'],
+                        'priority': 4,
+                        'description': '이메일 처리'
+                    },
+                    'document': {
+                        'keywords': ['문서', '파일', 'document', 'doc', 'file'],
+                        'priority': 5,
+                        'description': '문서 처리'
+                    },
+                }
+                
+                # 메시지에서 필요한 작업 유형 추출
+                required_tasks = []
+                for key, config in keywords_map.items():
+                    if any(kw in user_message_lower for kw in config['keywords']):
+                        required_tasks.append({
+                            'type': key,
+                            'priority': config['priority'],
+                            'description': config['description']
+                        })
+                
+                # 우선순위로 정렬
+                required_tasks.sort(key=lambda x: x['priority'])
+                
+                # 필요한 Agent 매칭
+                execution_plan = []
+                for task_info in required_tasks:
+                    task_type = task_info['type']
+                    for agent in all_agents:
+                        if agent.id == orchestration_agent.id:
+                            continue
+                        agent_name_lower = agent.name.lower()
+                        # Agent 이름에 task type이 포함되어 있으면 매칭
+                        if task_type in agent_name_lower or any(kw in agent_name_lower for kw in keywords_map[task_type]['keywords'][:2]):
+                            execution_plan.append({
+                                'agent': agent,
+                                'task_type': task_type,
+                                'description': task_info['description']
+                            })
+                            break
+                
+                # =====================================================
+                # STEP 2: 실행 계획 로그
+                # =====================================================
+                if execution_plan:
+                    plan_details = "\n".join([
+                        f"  Step {i+1}: {item['agent'].name} ({item['description']})"
+                        for i, item in enumerate(execution_plan)
+                    ])
+                    if ws_server:
+                        ws_server.broadcast_agent_log(
+                            agent_id=orchestration_agent.id,
+                            agent_name=orchestration_agent.name,
+                            log_type='decision',
+                            message=f"📋 실행 계획 수립 완료 ({len(execution_plan)}개 Agent)",
+                            details=f"실행 순서:\n{plan_details}",
+                            task_id=task_id
+                        )
+                    print(f"[Server] Execution plan: {len(execution_plan)} agents")
+                else:
+                    if ws_server:
+                        ws_server.broadcast_agent_log(
+                            agent_id=orchestration_agent.id,
+                            agent_name=orchestration_agent.name,
+                            log_type='info',
+                            message="일반 질문으로 판단",
+                            details="Specialist Agent 없이 Answer Agent가 직접 답변합니다.",
+                            task_id=task_id
+                        )
+                
+                # =====================================================
+                # STEP 3: 순차 실행 (Step-by-Step)
+                # =====================================================
+                agent_results = []
+                
+                for step_num, plan_item in enumerate(execution_plan, 1):
+                    specialist = plan_item['agent']
+                    task_desc = plan_item['description']
+                    
+                    # Step 시작 로그
+                    if ws_server:
+                        ws_server.broadcast_agent_log(
+                            agent_id=orchestration_agent.id,
+                            agent_name=orchestration_agent.name,
+                            log_type='info',
+                            message=f"▶️ Step {step_num}/{len(execution_plan)}: {specialist.name} 호출",
+                            details=f"작업: {task_desc}",
+                            task_id=task_id
+                        )
+                    
+                    # Agent 작업 시작 로그
+                    if ws_server:
+                        ws_server.broadcast_agent_log(
+                            agent_id=specialist.id,
+                            agent_name=specialist.name,
+                            log_type='info',
+                            message=f"🔧 작업 시작: {task_desc}",
+                            details=f"요청 내용: {user_message}",
+                            task_id=task_id
+                        )
+                    
+                    # 시뮬레이션된 작업 결과 생성
+                    await asyncio.sleep(0.3)  # 약간의 딜레이로 순차 실행 시각화
+                    
+                    # 각 Agent 유형별 결과 생성
+                    if plan_item['task_type'] == 'menu':
+                        result = {
+                            'agent': specialist.name,
+                            'task': task_desc,
+                            'result': "🍽️ 추천 메뉴: 비빔밥, 파스타, 초밥 등"
+                        }
+                    elif plan_item['task_type'] == 'reservation':
+                        result = {
+                            'agent': specialist.name,
+                            'task': task_desc,
+                            'result': "📍 근처 식당 3곳 예약 가능 확인"
+                        }
+                    elif plan_item['task_type'] == 'schedule':
+                        result = {
+                            'agent': specialist.name,
+                            'task': task_desc,
+                            'result': "📅 일정 확인 완료"
+                        }
+                    else:
+                        result = {
+                            'agent': specialist.name,
+                            'task': task_desc,
+                            'result': f"✅ {task_desc} 완료"
+                        }
+                    
+                    agent_results.append(result)
+                    
+                    # Agent 작업 완료 로그
+                    if ws_server:
+                        ws_server.broadcast_agent_log(
+                            agent_id=specialist.id,
+                            agent_name=specialist.name,
+                            log_type='info',
+                            message=f"✅ 작업 완료: {result['result']}",
+                            details=f"다음 단계로 결과 전달",
+                            task_id=task_id
+                        )
+                    
+                    print(f"[Server] Step {step_num} completed: {specialist.name}")
+                
+                # =====================================================
+                # STEP 4: Answer Agent - 최종 종합 답변
+                # =====================================================
+                if ws_server:
+                    ws_server.broadcast_agent_log(
+                        agent_id=answer_agent.id,
+                        agent_name=answer_agent.name,
+                        log_type='info',
+                        message="📝 최종 답변 생성 중...",
+                        details=f"종합할 결과: {len(agent_results)}개",
+                        task_id=task_id
+                    )
+                
+                # 최종 답변 생성
+                final_answer = f"안녕하세요! '{user_message}'에 대해 처리했습니다.\n\n"
+                
+                if agent_results:
+                    final_answer += "📊 **처리 결과**\n\n"
+                    for i, res in enumerate(agent_results, 1):
+                        final_answer += f"**Step {i}. {res['agent']}**\n"
+                        final_answer += f"   └ {res['result']}\n\n"
+                    final_answer += "---\n모든 작업이 완료되었습니다! 추가로 도움이 필요하시면 말씀해 주세요. 😊"
+                else:
+                    final_answer += "귀하의 메시지를 확인했습니다. 어떻게 도와드릴까요?"
+                
+                # Answer Agent 응답 브로드캐스트
+                if ws_server:
+                    ws_server.broadcast_task_interaction(
+                        task_id=task_id,
+                        role='agent',
+                        message=final_answer,
+                        agent_id=answer_agent.id,
+                        agent_name=answer_agent.name
+                    )
+                    print(f"[Server] Answer Agent response broadcasted for task {task_id}")
+                    
+                    # 답변 완료 로그
+                    ws_server.broadcast_agent_log(
+                        agent_id=answer_agent.id,
+                        agent_name=answer_agent.name,
+                        log_type='info',
+                        message="✅ 답변 완료",
+                        details="사용자에게 최종 답변을 전달했습니다.",
+                        task_id=task_id
+                    )
+                    
+                    # Orchestration 완료 로그
+                    agent_names = " → ".join([item['agent'].name for item in execution_plan]) if execution_plan else "Direct"
+                    ws_server.broadcast_agent_log(
+                        agent_id=orchestration_agent.id,
+                        agent_name=orchestration_agent.name,
+                        log_type='info',
+                        message=f"🎉 Task 완료",
+                        details=f"실행 흐름: Orchestration → {agent_names} → Answer Agent",
+                        task_id=task_id
+                    )
+                
+            except Exception as e:
+                print(f"[Server] ERROR processing task_interaction: {e}")
+                import traceback
+                traceback.print_exc()
+                
+                # 에러 메시지 브로드캐스트
+                if ws_server:
+                    ws_server.broadcast_task_interaction(
+                        task_id=task_id,
+                        role='system',
+                        message=f"메시지 처리 중 오류가 발생했습니다: {str(e)}",
+                        agent_id=None,
+                        agent_name="System"
+                    )
+        
+        elif message.type == WebSocketMessageType.CHAT_MESSAGE:
+            # 🆕 LLM Chat: Orchestration → Specialist (optional) → Answer Agent
+            payload = message.payload
+            user_message = payload.get('message')
+            
+            print(f"[Server] Processing chat_message: {user_message[:50]}...")
+            
+            # Orchestration Agent 찾기
+            orchestration_agent = None
+            all_agents = agent_registry.get_all_agents()
+            
+            for agent in all_agents:
+                agent_name_lower = agent.name.lower()
+                agent_type_lower = agent.type.lower() if hasattr(agent, 'type') else ''
+                state = agent.get_state()
+                
+                if ('orchestration' in agent_name_lower or 
+                    'orchestration' in agent_type_lower or
+                    (hasattr(state, 'description') and state.description and 'orchestration' in state.description.lower())):
+                    orchestration_agent = agent
+                    break
+            
+            if not orchestration_agent and len(all_agents) > 0:
+                orchestration_agent = all_agents[0]
+            
+            if not orchestration_agent:
+                print(f"[Server] ERROR: No agents available for chat")
+                if ws_server:
+                    ws_server.broadcast_chat_message(
+                        role='assistant',
+                        content='사용 가능한 Agent가 없습니다. 먼저 Agent를 생성해주세요.',
+                        agent_id=None,
+                        agent_name="System"
+                    )
+                return
+            
+            print(f"[Server] Using Orchestration Agent for LLM chat: {orchestration_agent.name}")
+            
+            # Orchestration Agent가 메시지 처리 및 응답
+            try:
+                # 1. Planning: Specialist Agent 필요 여부 판단
+                specialist_agent = None
+                user_message_lower = user_message.lower()
+                
+                for agent in all_agents:
+                    if agent.id == orchestration_agent.id:
+                        continue
+                    
+                    agent_name_lower = agent.name.lower()
+                    keywords_map = {
+                        'menu': ['메뉴', '음식', '식당', '점심', '저녁'],
+                        'reservation': ['예약', 'book'],
+                        'research': ['연구', '조사', 'research'],
+                    }
+                    
+                    for key, keywords in keywords_map.items():
+                        if any(kw in user_message_lower for kw in keywords):
+                            if key in agent_name_lower:
+                                specialist_agent = agent
+                                break
+                    
+                    if specialist_agent:
+                        break
+                
+                # 2. Specialist Agent 호출 (필요시)
+                specialist_context = ""
+                if specialist_agent:
+                    specialist_context = f"{specialist_agent.name}의 전문 분석을 바탕으로 답변합니다."
+                    print(f"[Server] LLM Chat delegated to: {specialist_agent.name}")
+                
+                # 3. Answer Agent가 최종 답변 생성
+                final_answer = f"안녕하세요! '{user_message}'에 대해 답변드리겠습니다.\n\n"
+                if specialist_agent:
+                    final_answer += f"{specialist_agent.name}와 협력하여 답변을 준비했습니다. "
+                final_answer += "무엇을 도와드릴까요?"
+                
+                # Answer Agent 응답 브로드캐스트
+                if ws_server:
+                    ws_server.broadcast_chat_message(
+                        role='assistant',
+                        content=final_answer,
+                        agent_id=answer_agent.id,
+                        agent_name=answer_agent.name
+                    )
+                    print(f"[Server] Answer Agent chat response broadcasted")
+                    
+            except Exception as e:
+                print(f"[Server] ERROR processing chat_message: {e}")
+                import traceback
+                traceback.print_exc()
+                
+                if ws_server:
+                    ws_server.broadcast_chat_message(
+                        role='assistant',
+                        content=f"메시지 처리 중 오류가 발생했습니다: {str(e)}",
+                        agent_id=None,
+                        agent_name="System"
+                    )
 
         # TODO: 다른 액션 처리 구현
         # - pause_agent -> agent_registry.update_agent_state()

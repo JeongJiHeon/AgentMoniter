@@ -13,9 +13,13 @@ class WebSocketMessageType(str, Enum):
     TASK_CREATED = "task_created"
     TASK_UPDATED = "task_updated"
     AGENT_RESPONSE = "agent_response"
+    TASK_INTERACTION = "task_interaction"
+    CHAT_MESSAGE_RESPONSE = "chat_message_response"
 
     # Client -> Server
     ASSIGN_TASK = "assign_task"
+    TASK_INTERACTION_CLIENT = "task_interaction"
+    CHAT_MESSAGE = "chat_message"
     CREATE_AGENT = "create_agent"
     APPROVE_REQUEST = "approve_request"
     REJECT_REQUEST = "reject_request"

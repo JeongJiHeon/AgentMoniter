@@ -83,7 +83,7 @@ class AgentMonitorWebSocketServer:
         
         print("[WebSocket] Server stopped")
     
-    async def _handle_connection(self, websocket: WebSocketServerProtocol, path: str) -> None:
+    async def _handle_connection(self, websocket: WebSocketServerProtocol) -> None:
         """클라이언트 연결 처리"""
         client_id = str(uuid4())
         client = WebSocketClient(client_id, websocket)
@@ -163,6 +163,8 @@ class AgentMonitorWebSocketServer:
                 WebSocketMessageType.PAUSE_AGENT,
                 WebSocketMessageType.RESUME_AGENT,
                 WebSocketMessageType.CANCEL_TICKET,
+                WebSocketMessageType.TASK_INTERACTION_CLIENT,
+                WebSocketMessageType.CHAT_MESSAGE,
             ]:
                 if self.on_client_action:
                     await self.on_client_action(client_id, message)
@@ -249,6 +251,29 @@ class AgentMonitorWebSocketServer:
             payload={"message": message, "level": level}
         ))
     
+    def broadcast_agent_log(self, agent_id: str, agent_name: str, log_type: str, message: str, details: str = None, task_id: str = None) -> None:
+        """Agent 로그 브로드캐스트"""
+        from uuid import uuid4
+        from datetime import datetime
+        
+        log_message = {
+            "id": str(uuid4()),
+            "agentId": agent_id,
+            "agentName": agent_name,
+            "type": log_type,  # 'info', 'decision', 'warning', 'error'
+            "message": message,
+            "details": details,
+            "relatedTaskId": task_id,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        print(f"[WebSocket] Broadcasting agent_log: {agent_name} - {log_type} - {message[:50]}... (taskId: {task_id})")
+        
+        self._broadcast(WebSocketMessage(
+            type="agent_log",
+            payload=log_message
+        ))
+    
     def broadcast_task_created(self, task) -> None:
         """Task 생성 브로드캐스트"""
         try:
@@ -287,6 +312,49 @@ class AgentMonitorWebSocketServer:
             import traceback
             traceback.print_exc()
     
+    def broadcast_task_interaction(self, task_id: str, role: str, message: str, agent_id: str = None, agent_name: str = None) -> None:
+        """Task 상호작용 메시지 브로드캐스트"""
+        from uuid import uuid4
+        from datetime import datetime
+        
+        interaction_message = {
+            "id": str(uuid4()),
+            "taskId": task_id,
+            "role": role,  # 'user' or 'agent'
+            "message": message,
+            "agentId": agent_id,
+            "agentName": agent_name,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        print(f"[WebSocket] Broadcasting task_interaction: taskId={task_id}, role={role}, message={message[:50]}...")
+        
+        self._broadcast(WebSocketMessage(
+            type=WebSocketMessageType.TASK_INTERACTION,
+            payload=interaction_message
+        ))
+    
+    def broadcast_chat_message(self, role: str, content: str, agent_id: str = None, agent_name: str = None) -> None:
+        """Chat 메시지 브로드캐스트 (Orchestration Agent 응답)"""
+        from uuid import uuid4
+        from datetime import datetime
+        
+        chat_message = {
+            "id": str(uuid4()),
+            "role": role,  # 'assistant' or 'user'
+            "content": content,
+            "agentId": agent_id,
+            "agentName": agent_name,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        print(f"[WebSocket] Broadcasting chat_message_response: role={role}, content={content[:50]}...")
+        
+        self._broadcast(WebSocketMessage(
+            type=WebSocketMessageType.CHAT_MESSAGE_RESPONSE,
+            payload=chat_message
+        ))
+    
     # === 유틸리티 ===
     
     def _broadcast(self, message: WebSocketMessage) -> None:
@@ -296,8 +364,7 @@ class AgentMonitorWebSocketServer:
         
         for client_id, client in self.clients.items():
             try:
-                if client.websocket.open:
-                    asyncio.create_task(client.websocket.send(data))
+                asyncio.create_task(client.websocket.send(data))
             except Exception:
                 disconnected.append(client_id)
         
@@ -308,7 +375,7 @@ class AgentMonitorWebSocketServer:
     async def _send_to_client(self, client_id: str, message: WebSocketMessage) -> None:
         """특정 클라이언트에 메시지 전송"""
         client = self.clients.get(client_id)
-        if client and client.websocket.open:
+        if client:
             try:
                 await client.websocket.send(json.dumps(message.to_dict()))
             except Exception as e:

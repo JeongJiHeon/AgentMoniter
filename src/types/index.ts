@@ -43,6 +43,7 @@ export interface AgentLog {
   relatedTicketId?: string;
   relatedApprovalId?: string;
   relatedA2ACallId?: string; // A2A 호출 연결
+  relatedTaskId?: string; // Task와 연관된 로그
   timestamp: Date;
 }
 
@@ -117,6 +118,17 @@ export interface Interaction {
   respondedAt?: Date;
 }
 
+// Task-specific Chat Message (Task 맥락 안에서의 대화)
+export interface TaskChatMessage {
+  id: string;
+  taskId: string;
+  role: 'user' | 'agent';
+  message: string;
+  agentId?: string; // Agent 메시지인 경우
+  agentName?: string; // Agent 메시지인 경우
+  timestamp: Date;
+}
+
 // WebSocket 메시지 타입
 export type WebSocketMessageType =
   | 'agent_update'
@@ -125,6 +137,8 @@ export type WebSocketMessageType =
   | 'a2a_response'
   | 'interaction_created'
   | 'interaction_responded'
+  | 'task_interaction' // Task-specific chat messages
+  | 'chat_message_response' // Global chat response from Orchestration Agent
   | 'ticket_created'
   | 'ticket_updated'
   | 'approval_request'

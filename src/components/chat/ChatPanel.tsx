@@ -12,6 +12,8 @@ interface ChatPanelProps {
   onAutoSavePersonalization?: (items: Omit<PersonalizationItem, 'id' | 'createdAt' | 'updatedAt' | 'source'>[]) => void;
   externalMessages?: ChatMessage[];
   onMessagesRead?: () => void;
+  onSendMessage?: (message: string) => void; // Orchestration Agent를 통한 메시지 전송
+  useOrchestration?: boolean; // Orchestration Agent 사용 여부
 }
 
 export function ChatPanel({
@@ -23,6 +25,8 @@ export function ChatPanel({
   onAutoSavePersonalization,
   externalMessages = [],
   onMessagesRead,
+  onSendMessage,
+  useOrchestration = true, // 기본값으로 Orchestration Agent 사용
 }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
@@ -78,33 +82,42 @@ export function ChatPanel({
     setIsLoading(true);
 
     try {
-      // 시스템 프롬프트를 포함한 메시지 구성
-      const systemMessage: ChatMessage = {
-        id: 'system',
-        role: 'system',
-        content: systemPrompt,
-        timestamp: new Date(),
-      };
+      if (useOrchestration && onSendMessage) {
+        // Orchestration Agent를 통한 메시지 전송
+        onSendMessage(userMessage.content);
+        // 응답은 externalMessages를 통해 받음
+        setIsLoading(false);
+      } else {
+        // 기존 방식: 직접 LLM 호출
+        // 시스템 프롬프트를 포함한 메시지 구성
+        const systemMessage: ChatMessage = {
+          id: 'system',
+          role: 'system',
+          content: systemPrompt,
+          timestamp: new Date(),
+        };
 
-      const conversationMessages = messages.length === 0
-        ? [systemMessage, userMessage]
-        : [...messages, userMessage];
+        const conversationMessages = messages.length === 0
+          ? [systemMessage, userMessage]
+          : [...messages, userMessage];
 
-      // 실제 LLM API 호출
-      const content = await callLLM(llmConfig, conversationMessages);
+        // 실제 LLM API 호출
+        const content = await callLLM(llmConfig, conversationMessages);
 
-      const assistantMessage: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        content,
-        timestamp: new Date(),
-      };
-      setMessages(prev => [...prev, assistantMessage]);
+        const assistantMessage: ChatMessage = {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content,
+          timestamp: new Date(),
+        };
+        setMessages(prev => [...prev, assistantMessage]);
 
-      // 자동으로 개인화 정보 추출 시도 (비동기로 실행, 블로킹하지 않음)
-      extractPersonalizationInfo(userMessage.content, content).catch(err => {
-        console.error('[ChatPanel] 개인화 정보 추출 실패:', err);
-      });
+        // 자동으로 개인화 정보 추출 시도 (비동기로 실행, 블로킹하지 않음)
+        extractPersonalizationInfo(userMessage.content, content).catch(err => {
+          console.error('[ChatPanel] 개인화 정보 추출 실패:', err);
+        });
+        setIsLoading(false);
+      }
     } catch (error) {
       const errorMessage: ChatMessage = {
         id: crypto.randomUUID(),
@@ -113,7 +126,6 @@ export function ChatPanel({
         timestamp: new Date(),
       };
       setMessages(prev => [...prev, errorMessage]);
-    } finally {
       setIsLoading(false);
     }
   };

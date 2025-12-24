@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "updatedAt": "2025-12-24T12:40:09.415994",
+  "updatedAt": "2025-12-24T15:37:08.260855",
   "agents": [
     {
       "id": "b2bd8dfe-c6a4-4725-ae84-80487068dc75",
@@ -65,6 +65,71 @@
         "lastActivity": "2025-12-24T12:40:09.411919",
         "createdAt": "2025-12-24T12:40:09.411654",
         "updatedAt": "2025-12-24T12:40:09.411654"
+      }
+    },
+    {
+      "id": "e3394118-6eda-4be7-8ac7-b5084f0d8c7f",
+      "name": "장소 예약 Agent",
+      "type": "custom",
+      "description": "장소를 예약합니다",
+      "constraints": [
+        "승인 없이 외부 API 호출 금지",
+        "민감한 정보(연락처, 결제 정보 등)는 로그에 기록하지 않음",
+        "작업 시작 전 반드시 실행 계획 제시"
+      ],
+      "permissions": {},
+      "customConfig": {},
+      "createdAt": "2025-12-24T15:37:08.259946",
+      "updatedAt": "2025-12-24T15:37:08.259954",
+      "state": {
+        "id": "e3394118-6eda-4be7-8ac7-b5084f0d8c7f",
+        "name": "장소 예약 Agent",
+        "type": "custom",
+        "description": "장소를 예약합니다",
+        "status": "active",
+        "thinkingMode": "idle",
+        "currentTaskId": null,
+        "currentTaskDescription": null,
+        "constraints": [
+          {
+            "id": "f8a69c9b-ac51-4471-935a-22c6e7d63345",
+            "type": "action_forbidden",
+            "description": "승인 없이 외부 API 호출 금지",
+            "condition": null,
+            "isActive": true,
+            "source": "system"
+          },
+          {
+            "id": "299e6b5d-41c9-4301-b1d7-fe1b53b69428",
+            "type": "action_forbidden",
+            "description": "민감한 정보(연락처, 결제 정보 등)는 로그에 기록하지 않음",
+            "condition": null,
+            "isActive": true,
+            "source": "system"
+          },
+          {
+            "id": "10893847-a943-4f01-9777-47d23b3d8fbc",
+            "type": "action_forbidden",
+            "description": "작업 시작 전 반드시 실행 계획 제시",
+            "condition": null,
+            "isActive": true,
+            "source": "system"
+          }
+        ],
+        "permissions": {
+          "canCreateTickets": true,
+          "canExecuteApproved": true,
+          "canAccessMcp": []
+        },
+        "stats": {
+          "ticketsCreated": 0,
+          "ticketsCompleted": 0,
+          "ticketsRejected": 0,
+          "averageApprovalTime": null
+        },
+        "lastActivity": "2025-12-24T15:37:08.256620",
+        "createdAt": "2025-12-24T15:37:08.256249",
+        "updatedAt": "2025-12-24T15:37:08.256249"
       }
     }
   ]
