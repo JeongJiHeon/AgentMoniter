@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { Task, CreateTaskInput, TaskStatus, TaskPriority } from '../../types/task';
-import type { Agent, Ticket, ApprovalRequest } from '../../types';
+import type { Agent, Ticket, ApprovalRequest, AgentLog, LLMConfig, Interaction } from '../../types';
 import { TaskCard } from './TaskCard';
 import { CreateTaskModal } from './CreateTaskModal';
 import { AnalyzeMCPMessagesModal } from './AnalyzeMCPMessagesModal';
@@ -11,12 +11,15 @@ interface TaskPanelProps {
   agents: Agent[];
   tickets?: Ticket[];
   approvalRequests?: ApprovalRequest[];
+  agentLogs?: AgentLog[];
+  interactions?: Interaction[];
   onCreateTask: (task: CreateTaskInput) => void;
   onUpdateTask: (id: string, updates: Partial<Task>) => void;
   onDeleteTask: (id: string) => void;
   onAssignAgent?: (taskId: string, agentId: string) => void;
+  onRespondInteraction?: (interactionId: string, response: string) => void;
   availableMCPs: Array<{ id: string; type: string; name: string; status: string }>;
-  llmConfig: { provider: string; model: string; apiKey?: string };
+  llmConfig: LLMConfig;
   autoAssignMode?: 'global' | 'manual';
   onAutoAssignModeChange?: (mode: 'global' | 'manual') => void;
 }
@@ -26,10 +29,13 @@ export function TaskPanel({
   agents,
   tickets = [],
   approvalRequests = [],
+  agentLogs = [],
+  interactions = [],
   onCreateTask,
   onUpdateTask,
   onDeleteTask,
   onAssignAgent,
+  onRespondInteraction,
   availableMCPs,
   llmConfig,
   autoAssignMode = 'manual',
@@ -51,6 +57,14 @@ export function TaskPanel({
   const pendingTasks = filteredTasks.filter(t => t.status === 'pending');
   const inProgressTasks = filteredTasks.filter(t => t.status === 'in_progress');
   const completedTasks = filteredTasks.filter(t => t.status === 'completed');
+
+  // Attention metrics
+  const tasksNeedingApproval = approvalRequests.filter(req =>
+    tasks.some(t => t.assignedAgentId === req.agentId)
+  ).length;
+  const tasksWithoutAgent = tasks.filter(t => !t.assignedAgentId && t.status !== 'completed' && t.status !== 'cancelled').length;
+  const failedTasks = tickets.filter(t => t.status === 'rejected').length;
+  const pendingInteractions = interactions.filter(i => i.status === 'pending').length;
 
   const handleStatusChange = (taskId: string, newStatus: TaskStatus) => {
     const updates: Partial<Task> = { status: newStatus };
@@ -75,6 +89,12 @@ export function TaskPanel({
   const taskApprovals = selectedTaskId
     ? approvalRequests.filter(a => a.agentId === selectedTask?.assignedAgentId)
     : [];
+  const taskAgentLogs = selectedTaskId
+    ? agentLogs.filter(log => log.agentId === selectedTask?.assignedAgentId)
+    : [];
+  const taskInteractions = selectedTaskId
+    ? interactions.filter(i => i.taskId === selectedTaskId)
+    : [];
 
   return (
     <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700 flex flex-col" style={{ minHeight: 'calc(100vh - 200px)' }}>
@@ -90,6 +110,44 @@ export function TaskPanel({
           </span>
         </div>
       </div>
+
+      {/* Attention Section */}
+      {(tasksNeedingApproval > 0 || tasksWithoutAgent > 0 || failedTasks > 0 || pendingInteractions > 0) && (
+        <div className="mb-6 p-4 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+          <div className="flex items-center gap-2 mb-3">
+            <svg className="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <h3 className="text-sm font-semibold text-amber-400">Needs Your Attention</h3>
+          </div>
+          <div className="space-y-2 text-sm">
+            {tasksNeedingApproval > 0 && (
+              <div className="flex items-center gap-2 text-white">
+                <span className="w-2 h-2 rounded-full bg-amber-400"></span>
+                <span><strong>{tasksNeedingApproval}</strong> approval{tasksNeedingApproval > 1 ? 's' : ''} waiting</span>
+              </div>
+            )}
+            {pendingInteractions > 0 && (
+              <div className="flex items-center gap-2 text-white">
+                <span className="w-2 h-2 rounded-full bg-blue-400"></span>
+                <span><strong>{pendingInteractions}</strong> interaction{pendingInteractions > 1 ? 's' : ''} pending</span>
+              </div>
+            )}
+            {tasksWithoutAgent > 0 && (
+              <div className="flex items-center gap-2 text-white">
+                <span className="w-2 h-2 rounded-full bg-yellow-400"></span>
+                <span><strong>{tasksWithoutAgent}</strong> task{tasksWithoutAgent > 1 ? 's' : ''} without agent</span>
+              </div>
+            )}
+            {failedTasks > 0 && (
+              <div className="flex items-center gap-2 text-white">
+                <span className="w-2 h-2 rounded-full bg-red-400"></span>
+                <span><strong>{failedTasks}</strong> rejected ticket{failedTasks > 1 ? 's' : ''}</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Action Buttons */}
       <div className="flex gap-3 mb-6">
@@ -292,8 +350,12 @@ export function TaskPanel({
           onClose={() => setIsDetailModalOpen(false)}
           task={selectedTask}
           agent={selectedAgent}
+          allAgents={agents}
           tickets={taskTickets}
           approvalRequests={taskApprovals}
+          agentLogs={taskAgentLogs}
+          interactions={taskInteractions}
+          onRespondInteraction={onRespondInteraction}
         />
       )}
     </div>

@@ -2,6 +2,18 @@ import { WebSocketServer as WSServer, WebSocket } from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import type { Agent, Ticket, ApprovalRequest, WebSocketMessageType } from '../models/index.js';
 
+interface AgentLog {
+  id: string;
+  agentId: string;
+  agentName: string;
+  type: 'info' | 'decision' | 'warning' | 'error';
+  message: string;
+  details?: string;
+  relatedTicketId?: string;
+  relatedApprovalId?: string;
+  timestamp: Date;
+}
+
 interface WebSocketClient {
   id: string;
   ws: WebSocket;
@@ -192,6 +204,17 @@ export class AgentMonitorWebSocketServer {
     this.broadcast({
       type: 'approval_resolved',
       payload: request,
+      timestamp: new Date(),
+    });
+  }
+
+  /**
+   * Agent 로그 브로드캐스트
+   */
+  broadcastAgentLog(log: AgentLog): void {
+    this.broadcast({
+      type: 'agent_log',
+      payload: log,
       timestamp: new Date(),
     });
   }

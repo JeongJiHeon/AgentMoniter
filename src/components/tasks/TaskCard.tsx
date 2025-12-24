@@ -28,17 +28,33 @@ const statusColors: Record<TaskStatus, string> = {
   cancelled: 'border-red-500 opacity-50',
 };
 
+// 상태에 따른 행동 유도 메시지
+const getActionMessage = (task: Task, assignedAgent?: Agent, allAgents?: Agent[]): string => {
+  if (task.status === 'completed') return 'Completed';
+  if (task.status === 'cancelled') return 'Cancelled';
+  if (!task.assignedAgentId) return 'No agent assigned';
+  if (task.status === 'pending') return 'Waiting to start';
+  if (task.status === 'in_progress') {
+    if (assignedAgent?.thinkingMode === 'idle') return 'Agent idle';
+
+    // Orchestration Agent인 경우 sub agent 개수 표시
+    if (assignedAgent?.role === 'orchestration' && assignedAgent.subAgents && assignedAgent.subAgents.length > 0) {
+      const activeSubAgents = assignedAgent.subAgents.filter(subId =>
+        allAgents?.find(a => a.id === subId && a.isActive)
+      ).length;
+      return `Running with ${activeSubAgents} agent${activeSubAgents !== 1 ? 's' : ''}`;
+    }
+
+    return 'Running';
+  }
+  return 'Unknown status';
+};
+
 export function TaskCard({ task, agents, onStatusChange, onUpdate, onDelete, onAssignAgent, onViewDetail, autoAssignMode = 'manual' }: TaskCardProps) {
   const [showAssignModal, setShowAssignModal] = React.useState(false);
-  
-  const handleStatusClick = () => {
-    const statusOrder: TaskStatus[] = ['pending', 'in_progress', 'completed'];
-    const currentIndex = statusOrder.indexOf(task.status);
-    const nextIndex = (currentIndex + 1) % statusOrder.length;
-    onStatusChange(task.id, statusOrder[nextIndex]);
-  };
 
   const assignedAgent = agents.find(a => a.id === task.assignedAgentId);
+  const actionMessage = getActionMessage(task, assignedAgent, agents);
 
   const handleAssign = (agentId: string) => {
     if (onAssignAgent) {
@@ -49,8 +65,7 @@ export function TaskCard({ task, agents, onStatusChange, onUpdate, onDelete, onA
 
   return (
     <div
-      className={`p-3 bg-slate-700 rounded-lg border ${statusColors[task.status]} cursor-pointer hover:bg-slate-650 transition-all`}
-      onClick={handleStatusClick}
+      className={`p-3 bg-slate-700 rounded-lg border ${statusColors[task.status]} transition-all hover:border-slate-500`}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
@@ -63,7 +78,7 @@ export function TaskCard({ task, agents, onStatusChange, onUpdate, onDelete, onA
           {task.description && (
             <p className="text-xs text-slate-400 line-clamp-2 mb-2">{task.description}</p>
           )}
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-2 flex-wrap mb-2">
             {task.tags.length > 0 && (
               <div className="flex gap-1 flex-wrap">
                 {task.tags.slice(0, 2).map((tag, idx) => (
@@ -81,35 +96,59 @@ export function TaskCard({ task, agents, onStatusChange, onUpdate, onDelete, onA
                 {task.source === 'slack' ? '💬 Slack' : task.source === 'confluence' ? '📄 Confluence' : task.source}
               </span>
             )}
-            {assignedAgent && (
-              <span className="text-xs text-blue-400">
-                🤖 {assignedAgent.name}
-              </span>
+          </div>
+
+          {/* Action Message */}
+          <div className={`text-xs font-medium mb-3 ${
+            !task.assignedAgentId ? 'text-yellow-400' :
+            task.status === 'completed' ? 'text-green-400' :
+            task.status === 'in_progress' ? 'text-blue-400' :
+            'text-slate-400'
+          }`}>
+            Status: {actionMessage}
+            {assignedAgent && task.status === 'in_progress' && (
+              <span className="ml-2 text-slate-400">({assignedAgent.name})</span>
             )}
-            {task.autoAssign !== undefined && (
-              <span className={`text-xs ${task.autoAssign ? 'text-green-400' : 'text-slate-500'}`}>
-                {task.autoAssign ? '⚡ 자동' : '✋ 수동'}
-              </span>
+          </div>
+
+          {/* Action Buttons */}
+          <div className="flex items-center gap-2">
+            {onViewDetail && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onViewDetail(task.id);
+                }}
+                className="px-3 py-1.5 bg-slate-600 hover:bg-slate-500 text-white text-xs font-medium rounded transition-colors"
+              >
+                View Detail
+              </button>
+            )}
+            {!task.assignedAgentId && onAssignAgent && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowAssignModal(true);
+                }}
+                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded transition-colors"
+              >
+                Assign Agent
+              </button>
+            )}
+            {task.status !== 'completed' && task.status !== 'cancelled' && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onStatusChange(task.id, 'cancelled');
+                }}
+                className="px-3 py-1.5 bg-slate-700 hover:bg-red-600 text-slate-300 hover:text-white text-xs font-medium rounded transition-colors"
+              >
+                Cancel
+              </button>
             )}
           </div>
         </div>
         <div className="flex items-center gap-1">
-          {/* 상세보기 버튼 */}
-          {onViewDetail && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onViewDetail(task.id);
-              }}
-              className="p-1 text-slate-400 hover:text-purple-400 transition-colors"
-              title="상세보기"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-              </svg>
-            </button>
-          )}
           {/* 자동 할당 토글 (수동 모드일 때만 표시) */}
           {autoAssignMode === 'manual' && task.autoAssign !== undefined && (
             <button
@@ -133,20 +172,6 @@ export function TaskCard({ task, agents, onStatusChange, onUpdate, onDelete, onA
               </svg>
             </button>
           )}
-          {!task.assignedAgentId && onAssignAgent && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setShowAssignModal(true);
-              }}
-              className="p-1 text-slate-400 hover:text-blue-400 transition-colors"
-              title="Agent 할당"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-              </svg>
-            </button>
-          )}
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -162,12 +187,6 @@ export function TaskCard({ task, agents, onStatusChange, onUpdate, onDelete, onA
         </div>
       </div>
       <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
-        <span>
-          {task.status === 'pending' && '대기 중'}
-          {task.status === 'in_progress' && '진행 중'}
-          {task.status === 'completed' && '완료'}
-          {task.status === 'cancelled' && '취소됨'}
-        </span>
         <span>{new Date(task.createdAt).toLocaleDateString('ko-KR', { month: 'short', day: 'numeric' })}</span>
       </div>
 

@@ -1,16 +1,65 @@
 // Agent 사고 모드
 export type ThinkingMode = 'idle' | 'exploring' | 'structuring' | 'validating' | 'summarizing';
 
+// Agent 역할 (Orchestration vs Specialist)
+export type AgentRole = 'orchestration' | 'specialist';
+
+// Agent Log 타입 (사용자가 이해할 수 있는 로그만)
+export type AgentLogType = 'info' | 'decision' | 'warning' | 'error' | 'a2a_call' | 'a2a_response';
+
+// A2A (Agent-to-Agent) 호출
+export interface A2ACall {
+  id: string;
+  fromAgentId: string;
+  fromAgentName: string;
+  toAgentId: string;
+  toAgentName: string;
+  purpose: string; // "Analyze documents", "Execute action"
+  input: unknown;
+  timestamp: Date;
+}
+
+// A2A 응답
+export interface A2AResponse {
+  id: string;
+  callId: string;
+  agentId: string;
+  agentName: string;
+  summary: string;
+  artifacts?: Array<{ type: string; data: unknown }>;
+  decisions?: string[];
+  recommendation?: string;
+  timestamp: Date;
+}
+
+// Agent Activity Log
+export interface AgentLog {
+  id: string;
+  agentId: string;
+  agentName: string;
+  type: AgentLogType;
+  message: string; // 사람이 읽을 수 있는 문장
+  details?: string; // 선택적 세부 정보
+  relatedTicketId?: string;
+  relatedApprovalId?: string;
+  relatedA2ACallId?: string; // A2A 호출 연결
+  timestamp: Date;
+}
+
 // Agent 상태
 export interface Agent {
   id: string;
   name: string;
   type: string;
+  role?: AgentRole; // orchestration or specialist
   thinkingMode: ThinkingMode;
   currentTask: string | null;
   constraints: string[];
   lastActivity: Date;
   isActive: boolean;
+  // Orchestration Agent 전용
+  subAgents?: string[]; // Sub Agent IDs
+  orchestratorId?: string; // 이 Agent를 호출한 Orchestrator
 }
 
 // 티켓 상태
@@ -50,9 +99,32 @@ export interface ApprovalRequest {
   createdAt: Date;
 }
 
+// Interaction 타입 (Approval보다 유연한 양방향 상호작용)
+export type InteractionType = 'clarify' | 'adjust' | 'guide';
+
+// Interaction
+export interface Interaction {
+  id: string;
+  taskId: string;
+  agentId: string;
+  agentName: string;
+  type: InteractionType;
+  question: string; // Agent가 묻는 질문 또는 제안
+  options?: Array<{ id: string; label: string; description?: string }>; // clarify용
+  userResponse?: string; // User의 응답
+  status: 'pending' | 'responded' | 'cancelled';
+  createdAt: Date;
+  respondedAt?: Date;
+}
+
 // WebSocket 메시지 타입
 export type WebSocketMessageType =
   | 'agent_update'
+  | 'agent_log'
+  | 'a2a_call'
+  | 'a2a_response'
+  | 'interaction_created'
+  | 'interaction_responded'
   | 'ticket_created'
   | 'ticket_updated'
   | 'approval_request'
@@ -202,6 +274,9 @@ export interface DashboardState {
   agents: Agent[];
   tickets: Ticket[];
   approvalQueue: ApprovalRequest[];
+  interactions: Interaction[];
+  a2aCalls: A2ACall[];
+  a2aResponses: A2AResponse[];
   isConnected: boolean;
   settings: AppSettings;
 }

@@ -1,14 +1,21 @@
 import { useEffect, useState } from 'react';
 import type { Task } from '../../types/task';
-import type { Agent, Ticket, ApprovalRequest } from '../../types';
+import type { Agent, Ticket, ApprovalRequest, AgentLog, Interaction } from '../../types';
+import { AgentActivityLog } from './AgentActivityLog';
+import { AgentInteractionPanel } from './AgentInteractionPanel';
+import { OrchestrationView } from './OrchestrationView';
 
 interface TaskDetailModalProps {
   isOpen: boolean;
   onClose: () => void;
   task: Task;
   agent?: Agent;
+  allAgents?: Agent[]; // For showing sub agents
   tickets: Ticket[];
   approvalRequests: ApprovalRequest[];
+  agentLogs?: AgentLog[];
+  interactions?: Interaction[];
+  onRespondInteraction?: (interactionId: string, response: string) => void;
 }
 
 export function TaskDetailModal({
@@ -16,10 +23,19 @@ export function TaskDetailModal({
   onClose,
   task,
   agent,
+  allAgents = [],
   tickets,
   approvalRequests,
+  agentLogs = [],
+  interactions = [],
+  onRespondInteraction,
 }: TaskDetailModalProps) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'tickets' | 'approvals'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'agent_activity' | 'interaction' | 'approvals'>('overview');
+
+  // Get sub agents if orchestrator
+  const subAgents = agent?.role === 'orchestration' && agent.subAgents
+    ? agent.subAgents.map(id => allAgents.find(a => a.id === id)).filter(Boolean) as Agent[]
+    : [];
 
   useEffect(() => {
     // ESC 키로 모달 닫기
@@ -106,27 +122,57 @@ export function TaskDetailModal({
                 : 'text-slate-400 hover:text-white hover:bg-slate-700/50'
             }`}
           >
-            개요
+            Overview
           </button>
           <button
-            onClick={() => setActiveTab('tickets')}
+            onClick={() => setActiveTab('timeline')}
             className={`px-4 py-2 text-sm font-medium transition-colors rounded-t-lg ${
-              activeTab === 'tickets'
+              activeTab === 'timeline'
                 ? 'bg-slate-700 text-white'
                 : 'text-slate-400 hover:text-white hover:bg-slate-700/50'
             }`}
           >
-            티켓 ({tickets.length})
+            Timeline
+          </button>
+          <button
+            onClick={() => setActiveTab('agent_activity')}
+            className={`px-4 py-2 text-sm font-medium transition-colors rounded-t-lg ${
+              activeTab === 'agent_activity'
+                ? 'bg-slate-700 text-white'
+                : 'text-slate-400 hover:text-white hover:bg-slate-700/50'
+            }`}
+          >
+            Agent Activity
+          </button>
+          <button
+            onClick={() => setActiveTab('interaction')}
+            className={`px-4 py-2 text-sm font-medium transition-colors rounded-t-lg relative ${
+              activeTab === 'interaction'
+                ? 'bg-slate-700 text-white'
+                : 'text-slate-400 hover:text-white hover:bg-slate-700/50'
+            }`}
+          >
+            Interaction
+            {interactions.filter(i => i.status === 'pending').length > 0 && (
+              <span className="absolute -top-1 -right-1 w-5 h-5 bg-blue-500 text-white text-xs rounded-full flex items-center justify-center">
+                {interactions.filter(i => i.status === 'pending').length}
+              </span>
+            )}
           </button>
           <button
             onClick={() => setActiveTab('approvals')}
-            className={`px-4 py-2 text-sm font-medium transition-colors rounded-t-lg ${
+            className={`px-4 py-2 text-sm font-medium transition-colors rounded-t-lg relative ${
               activeTab === 'approvals'
                 ? 'bg-slate-700 text-white'
                 : 'text-slate-400 hover:text-white hover:bg-slate-700/50'
             }`}
           >
-            승인 요청 ({approvalRequests.length})
+            Approvals
+            {approvalRequests.length > 0 && (
+              <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white text-xs rounded-full flex items-center justify-center">
+                {approvalRequests.length}
+              </span>
+            )}
           </button>
         </div>
 
@@ -134,6 +180,11 @@ export function TaskDetailModal({
         <div className="flex-1 overflow-y-auto p-6">
           {activeTab === 'overview' && (
             <div className="space-y-6">
+              {/* Orchestration View */}
+              {agent?.role === 'orchestration' && (
+                <OrchestrationView orchestrator={agent} subAgents={subAgents} />
+              )}
+
               {/* 설명 */}
               <div>
                 <h3 className="text-sm font-medium text-slate-400 mb-2">설명</h3>
@@ -229,45 +280,73 @@ export function TaskDetailModal({
             </div>
           )}
 
-          {activeTab === 'tickets' && (
+          {activeTab === 'timeline' && (
             <div className="space-y-3">
               {tickets.length === 0 ? (
                 <div className="text-center py-12">
-                  <p className="text-slate-400">생성된 티켓이 없습니다</p>
+                  <p className="text-slate-400">No activity yet</p>
                   <p className="text-sm text-slate-500 mt-2">
-                    Agent가 작업을 처리하면 티켓이 여기에 표시됩니다
+                    Agent actions will appear here as timeline events
                   </p>
                 </div>
               ) : (
-                tickets.map(ticket => (
-                  <div key={ticket.id} className="p-4 bg-slate-700 rounded-lg border border-slate-600">
-                    <div className="flex items-start justify-between mb-2">
-                      <h4 className="text-white font-medium">{ticket.purpose}</h4>
-                      <span className={`text-xs px-2 py-1 rounded ${
-                        ticket.status === 'completed' ? 'bg-green-500/20 text-green-400' :
-                        ticket.status === 'approved' ? 'bg-blue-500/20 text-blue-400' :
-                        ticket.status === 'rejected' ? 'bg-red-500/20 text-red-400' :
-                        'bg-slate-600 text-slate-300'
-                      }`}>
-                        {ticket.status === 'pending_approval' && '승인 대기'}
-                        {ticket.status === 'approved' && '승인됨'}
-                        {ticket.status === 'in_progress' && '진행 중'}
-                        {ticket.status === 'completed' && '완료'}
-                        {ticket.status === 'rejected' && '거부됨'}
-                      </span>
-                    </div>
-                    <p className="text-sm text-slate-300 mb-3">{ticket.content}</p>
-                    {ticket.executionPlan && (
-                      <div className="mt-2 p-2 bg-slate-800 rounded text-xs text-slate-400">
-                        <strong className="text-slate-300">실행 계획:</strong> {ticket.executionPlan}
+                <div className="relative">
+                  {/* Timeline Line */}
+                  <div className="absolute left-4 top-0 bottom-0 w-0.5 bg-slate-700"></div>
+
+                  {/* Timeline Events */}
+                  {tickets.map((ticket) => (
+                    <div key={ticket.id} className="relative pl-12 pb-6">
+                      {/* Timeline Dot */}
+                      <div className={`absolute left-2 w-5 h-5 rounded-full border-2 border-slate-800 flex items-center justify-center ${
+                        ticket.status === 'completed' ? 'bg-green-500' :
+                        ticket.status === 'approved' ? 'bg-blue-500' :
+                        ticket.status === 'rejected' ? 'bg-red-500' :
+                        ticket.status === 'in_progress' ? 'bg-yellow-500' :
+                        'bg-slate-500'
+                      }`}></div>
+
+                      {/* Event Card */}
+                      <div className="bg-slate-700/50 rounded-lg p-3 border border-slate-600">
+                        <div className="flex items-start justify-between mb-2">
+                          <h4 className="text-white text-sm font-medium">{ticket.purpose}</h4>
+                          <span className={`text-xs px-2 py-1 rounded ${
+                            ticket.status === 'completed' ? 'bg-green-500/20 text-green-400' :
+                            ticket.status === 'approved' ? 'bg-blue-500/20 text-blue-400' :
+                            ticket.status === 'rejected' ? 'bg-red-500/20 text-red-400' :
+                            'bg-slate-600 text-slate-300'
+                          }`}>
+                            {ticket.status === 'pending_approval' && 'Pending'}
+                            {ticket.status === 'approved' && 'Approved'}
+                            {ticket.status === 'in_progress' && 'In Progress'}
+                            {ticket.status === 'completed' && 'Completed'}
+                            {ticket.status === 'rejected' && 'Rejected'}
+                          </span>
+                        </div>
+                        <p className="text-sm text-slate-300 mb-2">{ticket.content}</p>
+                        <div className="text-xs text-slate-500">
+                          {new Date(ticket.createdAt).toLocaleString('ko-KR')}
+                        </div>
                       </div>
-                    )}
-                    <div className="mt-2 text-xs text-slate-500">
-                      {new Date(ticket.createdAt).toLocaleString('ko-KR')}
                     </div>
-                  </div>
-                ))
+                  ))}
+                </div>
               )}
+            </div>
+          )}
+
+          {activeTab === 'agent_activity' && (
+            <div className="h-96">
+              <AgentActivityLog logs={agentLogs} />
+            </div>
+          )}
+
+          {activeTab === 'interaction' && (
+            <div className="h-96">
+              <AgentInteractionPanel
+                interactions={interactions}
+                onRespond={onRespondInteraction}
+              />
             </div>
           )}
 

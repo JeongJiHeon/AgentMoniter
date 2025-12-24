@@ -78,10 +78,36 @@ function ApprovalRequestCard({ request, isFirst, onRespond }: ApprovalRequestCar
         </span>
       </div>
 
-      {/* Message */}
-      <p className={`text-sm mb-4 ${isFirst ? 'text-white' : 'text-slate-300'}`}>
-        {request.message}
-      </p>
+      {/* Decision-focused structure */}
+      <div className="space-y-3 mb-4">
+        {/* What */}
+        <div>
+          <h4 className="text-xs font-semibold text-slate-400 mb-1">✔ Action</h4>
+          <p className={`text-sm ${isFirst ? 'text-white' : 'text-slate-300'}`}>
+            {request.message}
+          </p>
+        </div>
+
+        {/* Why - from type */}
+        <div>
+          <h4 className="text-xs font-semibold text-slate-400 mb-1">⚠ Reason</h4>
+          <p className="text-sm text-slate-300">
+            {request.type === 'proceed' && 'Manual approval required for this action'}
+            {request.type === 'select_option' && 'Multiple options available - your choice needed'}
+            {request.type === 'prioritize' && 'Priority decision required'}
+          </p>
+        </div>
+
+        {/* Impact - generic for now, can be enhanced with ticket details */}
+        <div>
+          <h4 className="text-xs font-semibold text-slate-400 mb-1">📄 Impact</h4>
+          <p className="text-sm text-slate-300">
+            {request.type === 'proceed' && 'Action will be executed immediately after approval'}
+            {request.type === 'select_option' && `${request.options?.length || 0} option(s) available`}
+            {request.type === 'prioritize' && 'Will affect task execution order'}
+          </p>
+        </div>
+      </div>
 
       {/* Options (for select_option type) */}
       {request.type === 'select_option' && request.options && (

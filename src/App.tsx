@@ -21,6 +21,8 @@ import type {
   Task,
   CreateTaskInput,
   ChatMessage,
+  AgentLog,
+  Interaction,
 } from './types';
 import { TaskPanel } from './components/tasks/TaskPanel';
 import { saveToLocalStorage, loadFromLocalStorage } from './utils/localStorage';
@@ -186,6 +188,8 @@ function App() {
     return saved || [];
   });
   const [isCreateAgentModalOpen, setIsCreateAgentModalOpen] = useState(false);
+  const [agentLogs, setAgentLogs] = useState<AgentLog[]>([]);
+  const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [tasks, setTasks] = useState<Task[]>(() => {
     const saved = loadFromLocalStorage<Task[]>('TASKS');
     if (saved) {
@@ -318,6 +322,31 @@ function App() {
             // 옵션이 없는 승인 요청은 티켓 목록에서 처리되므로 승인 대기에 추가하지 않음
             console.log(`[WebSocket] Approval request (no options) - will be shown in ticket list only: ${payload.message}`);
           }
+        } else if (message.type === 'agent_log') {
+          const payload = message.payload as AgentLog;
+          setAgentLogs(prev => [...prev, {
+            ...payload,
+            timestamp: new Date(payload.timestamp),
+          }]);
+          console.log(`[WebSocket] Agent log: ${payload.message}`);
+        } else if (message.type === 'interaction_created') {
+          const payload = message.payload as Interaction;
+          setInteractions(prev => [...prev, {
+            ...payload,
+            createdAt: new Date(payload.createdAt),
+            respondedAt: payload.respondedAt ? new Date(payload.respondedAt) : undefined,
+          }]);
+          console.log(`[WebSocket] Interaction created: ${payload.question}`);
+        } else if (message.type === 'interaction_responded') {
+          const payload = message.payload as Interaction;
+          setInteractions(prev =>
+            prev.map(i => i.id === payload.id ? {
+              ...payload,
+              createdAt: new Date(payload.createdAt),
+              respondedAt: payload.respondedAt ? new Date(payload.respondedAt) : undefined,
+            } : i)
+          );
+          console.log(`[WebSocket] Interaction responded: ${payload.id}`);
         } else if (message.type === 'agent_update') {
           const payload = message.payload;
           // status를 isActive로 변환 (active면 true)
@@ -1091,6 +1120,34 @@ function App() {
     }
   }, [tasks]);
 
+  const handleRespondInteraction = useCallback((interactionId: string, response: string) => {
+    // Update local state
+    setInteractions(prev =>
+      prev.map(i =>
+        i.id === interactionId
+          ? { ...i, userResponse: response, status: 'responded', respondedAt: new Date() }
+          : i
+      )
+    );
+
+    // Send to backend via WebSocket
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      const message = {
+        type: 'respond_interaction',
+        payload: {
+          interactionId,
+          response,
+        },
+        timestamp: new Date().toISOString(),
+      };
+
+      wsRef.current.send(JSON.stringify(message));
+      console.log(`[App] Sent respond_interaction message to backend:`, message);
+    } else {
+      console.warn(`[App] WebSocket not connected. Cannot respond to interaction ${interactionId}`);
+    }
+  }, []);
+
   return (
     <DashboardLayout 
       activeTab={activeTab} 
@@ -1205,10 +1262,13 @@ function App() {
             agents={allAgents}
             tickets={tickets}
             approvalRequests={approvalQueue}
+            agentLogs={agentLogs}
+            interactions={interactions}
             onCreateTask={handleCreateTask}
             onUpdateTask={handleUpdateTask}
             onDeleteTask={handleDeleteTask}
             onAssignAgent={handleAssignAgent}
+            onRespondInteraction={handleRespondInteraction}
             availableMCPs={settings.mcpServices}
             llmConfig={settings.llmConfig}
             autoAssignMode={autoAssignMode}
