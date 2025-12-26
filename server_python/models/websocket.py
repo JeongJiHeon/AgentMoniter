@@ -28,4 +28,5 @@ class WebSocketMessageType(str, Enum):
     CANCEL_TICKET = "cancel_ticket"
     PAUSE_AGENT = "pause_agent"
     RESUME_AGENT = "resume_agent"
+    UPDATE_LLM_CONFIG = "update_llm_config"  # LLM 설정 동기화
 

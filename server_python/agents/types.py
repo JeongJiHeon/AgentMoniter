@@ -67,13 +67,19 @@ class AgentInput:
 class AgentOutput:
     def __init__(
         self,
-        tickets: List[CreateTicketInput],
-        approval_requests: List[Dict[str, Any]],
-        logs: List[Dict[str, Any]]
+        type: str = 'result',
+        result: Optional[Dict[str, Any]] = None,
+        tickets: Optional[List[CreateTicketInput]] = None,
+        approval_requests: Optional[List[Dict[str, Any]]] = None,
+        logs: Optional[List[Dict[str, Any]]] = None,
+        metadata: Optional[Dict[str, Any]] = None
     ):
-        self.tickets = tickets
-        self.approval_requests = approval_requests
-        self.logs = logs
+        self.type = type
+        self.result = result or {}
+        self.tickets = tickets or []
+        self.approval_requests = approval_requests or []
+        self.logs = logs or []
+        self.metadata = metadata or {}
 
 
 class AgentConfig:
@@ -84,6 +90,7 @@ class AgentConfig:
         description: Optional[str] = None,
         permissions: Optional[Dict[str, Any]] = None,
         constraints: Optional[List[Dict[str, str]]] = None,
+        capabilities: Optional[List[str]] = None,
         custom_config: Optional[Dict[str, Any]] = None
     ):
         self.name = name
@@ -91,6 +98,7 @@ class AgentConfig:
         self.description = description
         self.permissions = permissions or {}
         self.constraints = constraints or []
+        self.capabilities = capabilities or ['general']
         self.custom_config = custom_config or {}
 
 

@@ -10,6 +10,12 @@ from models.ticket import Ticket
 from models.approval import ApprovalRequest
 from models.websocket import WebSocketMessageType
 
+# Import event store for event replay functionality
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from services.event_store import event_store
+
 
 class WebSocketClient:
     def __init__(self, client_id: str, websocket: WebSocketServerProtocol):
@@ -49,14 +55,18 @@ class AgentMonitorWebSocketServer:
         self.server: Optional[websockets.server.Serve] = None
         self.heartbeat_task: Optional[asyncio.Task] = None
         self.on_client_action: Optional[Callable[[str, WebSocketMessage], None]] = None
-        self._recent_tasks: Dict[str, dict] = {}  # 최근 Task 저장소 (task_id -> task_data)
+        self.event_store = event_store  # Use Redis event store for persistence
+        self._recent_tasks: Dict[str, dict] = {}  # 최근 Task 저장소
     
     async def start(self) -> None:
         """서버 시작"""
         self.server = await websockets.serve(
             self._handle_connection,
             "0.0.0.0",
-            self.port
+            self.port,
+            ping_interval=20,  # 20초마다 ping
+            ping_timeout=60,   # 60초 응답 대기
+            close_timeout=10   # 연결 종료 대기
         )
         
         # Heartbeat 시작
@@ -107,17 +117,38 @@ class AgentMonitorWebSocketServer:
                 type=WebSocketMessageType.AGENT_UPDATE,
                 payload=agent.model_dump(mode="json") if hasattr(agent, 'model_dump') else agent
             ))
-        
-        # 🆕 최근 대기 중인 Task 목록 전송 (재연결 시 누락된 Task 복구)
-        pending_tasks = [task for task in self._recent_tasks.values() 
-                        if task.get('status') == 'pending']
-        if pending_tasks:
-            print(f"[WebSocket] Sending {len(pending_tasks)} pending tasks to client {client_id}")
-            for task in pending_tasks:
-                await self._send_to_client(client_id, WebSocketMessage(
-                    type=WebSocketMessageType.TASK_CREATED,
-                    payload=task
-                ))
+
+        # 🆕 Event replay: Send recent events from Redis
+        try:
+            # Check if client has cursor (reconnection)
+            cursor = await self.event_store.redis_service.get_client_cursor(client_id)
+
+            if cursor:
+                # Reconnection: Replay missed events
+                print(f"[WebSocket] Client {client_id} reconnected, replaying events since {cursor}")
+                missed_events = await self.event_store.get_events_since(float(cursor), limit=1000)
+                print(f"[WebSocket] Replaying {len(missed_events)} missed events")
+
+                for event in missed_events:
+                    await self._send_to_client(client_id, WebSocketMessage(
+                        type=event.get("type", "unknown"),
+                        payload=event.get("payload", {}),
+                        timestamp=datetime.fromisoformat(event.get("timestamp"))
+                    ))
+            else:
+                # New connection: Send recent events (last 100)
+                print(f"[WebSocket] New client {client_id}, sending recent events")
+                recent_events = await self.event_store.get_recent_events(count=100)
+                print(f"[WebSocket] Sending {len(recent_events)} recent events")
+
+                for event in recent_events:
+                    await self._send_to_client(client_id, WebSocketMessage(
+                        type=event.get("type", "unknown"),
+                        payload=event.get("payload", {}),
+                        timestamp=datetime.fromisoformat(event.get("timestamp"))
+                    ))
+        except Exception as e:
+            print(f"[WebSocket] Event replay error: {e}")
         
         try:
             # Pong 핸들러 설정
@@ -177,6 +208,7 @@ class AgentMonitorWebSocketServer:
                 WebSocketMessageType.CANCEL_TICKET,
                 WebSocketMessageType.TASK_INTERACTION_CLIENT,
                 WebSocketMessageType.CHAT_MESSAGE,
+                WebSocketMessageType.UPDATE_LLM_CONFIG,
             ]:
                 if self.on_client_action:
                     await self.on_client_action(client_id, message)
@@ -223,9 +255,9 @@ class AgentMonitorWebSocketServer:
     
     def broadcast_agent_update(self, agent: Agent) -> None:
         """Agent 상태 업데이트 브로드캐스트"""
-        self._broadcast(WebSocketMessage(
-            type=WebSocketMessageType.AGENT_UPDATE,
-            payload=agent.model_dump(mode="json")
+        asyncio.create_task(self._broadcast_with_store(
+            WebSocketMessageType.AGENT_UPDATE,
+            agent.model_dump(mode="json")
         ))
     
     def broadcast_ticket_created(self, ticket: Ticket) -> None:
@@ -395,20 +427,56 @@ class AgentMonitorWebSocketServer:
     
     # === 유틸리티 ===
     
+    async def _broadcast_with_store(self, message_type: str, payload: dict) -> None:
+        """
+        Store event to Redis FIRST, then broadcast to clients
+        This ensures event persistence before delivery
+        """
+        try:
+            # 1. Store to Redis event store
+            timestamp = await self.event_store.store_event(message_type, payload)
+
+            # 2. Broadcast to connected clients
+            message = WebSocketMessage(type=message_type, payload=payload)
+            self._broadcast(message)
+
+            # 3. Update client cursors
+            for client_id in self.clients.keys():
+                try:
+                    await self.event_store.redis_service.save_client_cursor(client_id, str(timestamp))
+                except Exception as e:
+                    print(f"[WebSocket] Failed to save cursor for client {client_id}: {e}")
+
+        except Exception as e:
+            print(f"[WebSocket] _broadcast_with_store error: {e}")
+            # Fallback: still broadcast even if Redis fails
+            message = WebSocketMessage(type=message_type, payload=payload)
+            self._broadcast(message)
+
     def _broadcast(self, message: WebSocketMessage) -> None:
-        """모든 클라이언트에 브로드캐스트"""
+        """모든 클라이언트에 브로드캐스트 (internal use only)"""
+        if not self.clients:
+            print(f"[WebSocket] WARNING: No clients connected, cannot broadcast {message.type}")
+            return
+
         data = json.dumps(message.to_dict())
         disconnected = []
-        
+        sent_count = 0
+
         for client_id, client in self.clients.items():
             try:
                 asyncio.create_task(client.websocket.send(data))
-            except Exception:
+                sent_count += 1
+            except Exception as e:
+                print(f"[WebSocket] Failed to send to {client_id}: {e}")
                 disconnected.append(client_id)
-        
+
         for client_id in disconnected:
             if client_id in self.clients:
                 del self.clients[client_id]
+        
+        if disconnected:
+            print(f"[WebSocket] Removed {len(disconnected)} disconnected clients")
     
     async def _send_to_client(self, client_id: str, message: WebSocketMessage) -> None:
         """특정 클라이언트에 메시지 전송"""

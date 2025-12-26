@@ -12,6 +12,7 @@ const STORAGE_KEYS = {
   AUTO_ASSIGN_MODE: 'agent-monitor-auto-assign-mode',
   CUSTOM_AGENTS: 'agent-monitor-custom-agents',
   PERSONALIZATION: 'agent-monitor-personalization',
+  THEME: 'agent-monitor-theme',
 } as const;
 
 /**

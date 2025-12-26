@@ -1,4 +1,6 @@
 // Task 타입 정의
+import type { AgentLifecycleStatus } from './agentResult';
+
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled';
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 export type TaskSource = 'manual' | 'slack' | 'confluence' | 'email' | 'other';
@@ -18,6 +20,11 @@ export interface Task {
   createdAt: Date;
   updatedAt: Date;
   completedAt?: Date;
+
+  // Agent lifecycle status fields
+  agentLifecycleStatus?: AgentLifecycleStatus;
+  pendingQuestion?: string;
+  requiredInputs?: string[];
 }
 
 export interface CreateTaskInput {

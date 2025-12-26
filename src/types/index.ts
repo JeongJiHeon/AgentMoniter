@@ -1,3 +1,6 @@
+// Export Agent Result types (lifecycle contract)
+export * from './agentResult';
+
 // Agent 사고 모드
 export type ThinkingMode = 'idle' | 'exploring' | 'structuring' | 'validating' | 'summarizing';
 

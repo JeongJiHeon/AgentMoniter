@@ -1,6 +1,7 @@
 import React from 'react';
 import type { Task, TaskStatus, TaskPriority } from '../../types/task';
 import type { Agent, TaskChatMessage } from '../../types';
+import { getStatusColor, getStatusLabel, getStatusIcon } from '../../types/agentResult';
 import { AssignAgentModal } from './AssignAgentModal';
 import { TaskChatDrawer } from './TaskChatDrawer';
 
@@ -56,6 +57,7 @@ const getActionMessage = (task: Task, assignedAgent?: Agent, allAgents?: Agent[]
 export function TaskCard({ task, agents, onStatusChange, onUpdate, onDelete, onAssignAgent, onViewDetail, autoAssignMode = 'manual', taskChatMessages = [], onSendTaskMessage }: TaskCardProps) {
   const [showAssignModal, setShowAssignModal] = React.useState(false);
   const [showChatDrawer, setShowChatDrawer] = React.useState(false);
+  const [userResponse, setUserResponse] = React.useState('');
 
   const assignedAgent = agents.find(a => a.id === task.assignedAgentId);
   const actionMessage = getActionMessage(task, assignedAgent, agents);
@@ -67,6 +69,13 @@ export function TaskCard({ task, agents, onStatusChange, onUpdate, onDelete, onA
     if (onAssignAgent) {
       onAssignAgent(task.id, agentId);
       onUpdate(task.id, { assignedAgentId: agentId, status: 'in_progress' });
+    }
+  };
+
+  const handleUserResponse = () => {
+    if (userResponse.trim() && onSendTaskMessage) {
+      onSendTaskMessage(task.id, userResponse.trim());
+      setUserResponse('');
     }
   };
 
@@ -117,6 +126,50 @@ export function TaskCard({ task, agents, onStatusChange, onUpdate, onDelete, onA
               <span className="ml-2 text-slate-400">({assignedAgent.name})</span>
             )}
           </div>
+
+          {/* Agent Lifecycle Status Badge */}
+          {task.agentLifecycleStatus && (
+            <div className="mb-3">
+              <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold ${getStatusColor(task.agentLifecycleStatus)}`}>
+                <span>{getStatusIcon(task.agentLifecycleStatus)}</span>
+                <span>{getStatusLabel(task.agentLifecycleStatus)}</span>
+              </span>
+            </div>
+          )}
+
+          {/* Pending Question */}
+          {task.pendingQuestion && task.agentLifecycleStatus === 'WAITING_USER' && (
+            <div className="mb-3 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+              <div className="flex items-center gap-2 mb-2">
+                <svg className="w-4 h-4 text-amber-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <p className="text-xs font-semibold text-amber-400">Agent Question</p>
+              </div>
+              <p className="text-xs text-white mb-2 leading-relaxed">{task.pendingQuestion}</p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={userResponse}
+                  onChange={(e) => setUserResponse(e.target.value)}
+                  onKeyPress={(e) => {
+                    if (e.key === 'Enter') {
+                      handleUserResponse();
+                    }
+                  }}
+                  placeholder="Type your answer..."
+                  className="flex-1 px-2 py-1.5 bg-slate-800 border border-slate-600 rounded text-white text-xs placeholder-slate-500 focus:outline-none focus:border-amber-500"
+                />
+                <button
+                  onClick={handleUserResponse}
+                  disabled={!userResponse.trim()}
+                  className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:bg-slate-600 disabled:cursor-not-allowed text-white text-xs font-medium rounded transition-colors"
+                >
+                  Send
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Action Buttons */}
           <div className="flex items-center gap-2">

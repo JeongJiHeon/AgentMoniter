@@ -14,6 +14,7 @@ from datetime import datetime
 from enum import Enum
 from contextlib import asynccontextmanager
 
+
 # =============================================================================
 # LLM Client (Connection Pooling, Retry, Timeout)
 # =============================================================================
@@ -32,89 +33,12 @@ class LLMClient:
         return cls._instance
     
     def __init__(self):
-        self._initialized = getattr(self, '_initialized', False)
-        if self._initialized:
-            return  # Singleton: 이미 초기화됨
-        
         self.api_url = os.getenv("LLM_API_URL", "https://api.platform.a15t.com/v1/chat/completions")
         self.api_key = os.getenv("LLM_API_KEY", "")
         self.model = os.getenv("LLM_MODEL", "azure/openai/gpt-4o")
-        self.default_temperature = float(os.getenv("LLM_TEMPERATURE", "1.0"))
-        self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "8000"))
-        self.timeout = aiohttp.ClientTimeout(total=120, connect=10)  # timeout 증가
+        self.timeout = aiohttp.ClientTimeout(total=60, connect=10)
         self.max_retries = 3
         self.retry_delay = 1.0
-        self._initialized = True
-        
-        # 환경 변수 로드 상태 출력
-        self._print_config()
-    
-    def _print_config(self):
-        """현재 설정 출력"""
-        api_key_status = "✅ 설정됨" if self.api_key else "❌ 미설정"
-        print(f"[LLMClient] API URL: {self.api_url}")
-        print(f"[LLMClient] API Key: {api_key_status}")
-        print(f"[LLMClient] Model: {self.model}")
-        print(f"[LLMClient] Temperature: {self.default_temperature}")
-        print(f"[LLMClient] Max Tokens: {self.max_tokens}")
-    
-    def update_config(self, provider: str = None, model: str = None, api_key: str = None, 
-                     base_url: str = None, temperature: float = None, max_tokens: int = None):
-        """
-        프론트엔드에서 전달받은 LLM 설정으로 업데이트
-        """
-        updated = []
-        
-        if base_url is not None and base_url.strip():
-            # base_url에 /chat/completions가 없으면 추가
-            base_url = base_url.strip()
-            if not base_url.endswith('/chat/completions'):
-                if base_url.endswith('/'):
-                    base_url = base_url + 'chat/completions'
-                elif base_url.endswith('/v1'):
-                    base_url = base_url + '/chat/completions'
-                elif '/v1' in base_url:
-                    base_url = base_url.rstrip('/') + '/chat/completions'
-                else:
-                    base_url = base_url.rstrip('/') + '/v1/chat/completions'
-            
-            if base_url != self.api_url:
-                self.api_url = base_url
-                updated.append(f"api_url={base_url}")
-        
-        if api_key is not None and api_key != self.api_key:
-            self.api_key = api_key
-            updated.append("api_key=***")
-        
-        if model is not None and model != self.model:
-            # model이 이미 provider/model 형식이면 그대로 사용
-            # 예: "azure/openai/gpt-5-2025-08-07-gs" -> 그대로
-            # 예: "gpt-4o" + provider="openai" -> "openai/gpt-4o" (필요시)
-            # 하지만 프론트엔드에서 이미 조합된 형식으로 올 가능성이 높으므로 그대로 사용
-            if '/' in model:
-                # 이미 provider/model 형식
-                self.model = model
-            elif provider:
-                # provider와 model 분리된 경우 조합
-                self.model = f"{provider}/{model}"
-            else:
-                # model만 있는 경우 그대로 사용
-                self.model = model
-            updated.append(f"model={self.model}")
-        
-        if temperature is not None and temperature != self.default_temperature:
-            self.default_temperature = temperature
-            updated.append(f"temperature={temperature}")
-        
-        if max_tokens is not None and max_tokens != self.max_tokens:
-            self.max_tokens = max_tokens
-            updated.append(f"max_tokens={max_tokens}")
-        
-        if updated:
-            print(f"[LLMClient] 설정 업데이트: {', '.join(updated)}")
-            self._print_config()
-        
-        return len(updated) > 0
     
     async def _get_session(self) -> aiohttp.ClientSession:
         """세션 재사용 (Connection pooling)"""
@@ -136,7 +60,7 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         max_tokens: int = 1000,
-        temperature: float = None,  # None이면 기본값 사용
+        temperature: float = 0.7,
         json_mode: bool = False
     ) -> str:
         """
@@ -145,9 +69,6 @@ class LLMClient:
         if not self.api_key:
             print("[LLM] Warning: LLM_API_KEY not set")
             return '{"error": "LLM API 키가 설정되지 않았습니다."}'
-        
-        # temperature가 None이면 기본값 사용
-        actual_temperature = temperature if temperature is not None else self.default_temperature
         
         session = await self._get_session()
         
@@ -160,7 +81,7 @@ class LLMClient:
             "model": self.model,
             "messages": messages,
             "max_completion_tokens": max_tokens,
-            "temperature": actual_temperature,
+            "temperature": temperature,
             "stream": False
         }
         
@@ -168,7 +89,6 @@ class LLMClient:
             payload["response_format"] = {"type": "json_object"}
         
         last_error = None
-        print(f"[LLM] Calling API: {self.api_url}, model={self.model}, messages={len(messages)}")
         for attempt in range(self.max_retries):
             try:
                 async with session.post(
@@ -178,28 +98,7 @@ class LLMClient:
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
-                        print(f"[LLM] Raw API response: {json.dumps(data, ensure_ascii=False)[:500]}...")
-                        
-                        # Azure OpenAI / OpenAI 형식
-                        content = ""
-                        if "choices" in data and data["choices"]:
-                            choice = data["choices"][0]
-                            if "message" in choice:
-                                content = choice["message"].get("content", "")
-                            elif "text" in choice:
-                                content = choice["text"]
-                        
-                        # Anthropic 형식 대응
-                        if not content and "content" in data:
-                            if isinstance(data["content"], list):
-                                for item in data["content"]:
-                                    if item.get("type") == "text":
-                                        content = item.get("text", "")
-                                        break
-                            elif isinstance(data["content"], str):
-                                content = data["content"]
-                        
-                        print(f"[LLM] Parsed content: {len(content)} chars, preview: {content[:100] if content else 'EMPTY'}...")
+                        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                         return content
                     elif response.status == 429:  # Rate limit
                         retry_after = float(response.headers.get("Retry-After", self.retry_delay * (attempt + 1)))
@@ -231,7 +130,7 @@ llm_client = LLMClient()
 async def call_llm(
     messages: List[Dict[str, str]],
     max_tokens: int = 1000,
-    temperature: float = None,  # None이면 환경 변수 기본값 사용
+    temperature: float = 0.7,
     json_mode: bool = False
 ) -> str:
     """LLM 호출 유틸리티 함수 (하위 호환성)"""
@@ -360,23 +259,18 @@ class LLMAgent(BaseAgent):
                 }
             ]
             
-            print(f"[LLMAgent] {self.name}: Calling LLM...")
-            response = await call_llm(messages, max_tokens=4000, json_mode=True)
-            print(f"[LLMAgent] {self.name}: Response = {response[:200] if response else 'EMPTY'}...")
+            response = await call_llm(messages, max_tokens=800, temperature=0.7, json_mode=True)
             
             # JSON 파싱 시도
             try:
                 result_data = json.loads(response)
-                output = result_data.get("output", response)
-                print(f"[LLMAgent] {self.name}: Parsed output = {output[:100] if output else 'EMPTY'}...")
                 return AgentResult(
                     success=True,
-                    output=output,
+                    output=result_data.get("output", response),
                     data=result_data.get("data")
                 )
             except json.JSONDecodeError:
                 # JSON 파싱 실패 시 raw output 반환
-                print(f"[LLMAgent] {self.name}: JSON parse failed, using raw response")
                 return AgentResult(
                     success=True,
                     output=response
@@ -786,7 +680,7 @@ class OrchestrationEngine:
             }
         ]
         
-        final_response = await call_llm(messages, max_tokens=4000)
+        final_response = await call_llm(messages, max_tokens=1000, temperature=0.7)
         
         if not final_response or "error" in final_response.lower():
             final_response = f"✅ 작업이 완료되었습니다.\n\n📋 처리 내역:\n{results_text}"

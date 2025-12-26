@@ -5,6 +5,10 @@ Agent Monitor 서버 메인 엔트리포인트
 import os
 import sys
 
+# 🔴 출력 버퍼링 비활성화 (nohup에서 로그 즉시 출력)
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
 # 🔴 환경 변수는 반드시 다른 import 전에 로드해야 함!
 from dotenv import load_dotenv
 load_dotenv()
@@ -34,7 +38,10 @@ from agents.orchestration import (
     workflow_manager,
     orchestration_engine
 )
+from agents.dynamic_orchestration import dynamic_orchestration
 from services.slack_webhook import SlackWebhookService
+from services.redis_service import redis_service
+from services.event_store import event_store
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -229,7 +236,7 @@ class DemoAgent:
             }
         ]
         
-        result = await call_llm(messages, max_tokens=500, temperature=0.7)
+        result = await call_llm(messages, max_tokens=500)
         
         print(f"[Agent {self.name}] LLM result: {result[:100]}...")
 
@@ -267,12 +274,12 @@ async def create_demo_agent(config, agent_id=None):
 
 
 async def process_agent_task(agent, agent_input):
-    """Agent Task 처리 - 중앙 실행 루프(run_workflow) 사용"""
+    """Agent Task 처리 - Dynamic Orchestration 사용"""
     try:
         print(f"[Server] Starting task processing for agent {agent.name}")
         
-        # Orchestration Engine 초기화
-        orchestration_engine.set_ws_server(ws_server)
+        # Dynamic Orchestration Engine 초기화
+        dynamic_orchestration.set_ws_server(ws_server)
         
         # Agent 상태 업데이트: currentTaskId 설정
         task_id = agent_input.metadata.get('task_id', '')
@@ -282,75 +289,53 @@ async def process_agent_task(agent, agent_input):
         # 프론트엔드에서 받은 멀티-에이전트 플랜
         planned_agents = agent_input.metadata.get('planned_agents', [])
         
+        # Slack 정보 추출 (있는 경우)
+        slack_channel = agent_input.metadata.get('slack_channel')
+        slack_ts = agent_input.metadata.get('slack_ts')
+        
+        # 사용 가능한 Agent 목록 구성
         all_agents = agent_registry.get_all_agents()
-        agent_map = {ag.id: ag for ag in all_agents}
+        available_agents = [
+            {
+                "id": ag.id,
+                "name": ag.name,
+                "type": ag.type if hasattr(ag, 'type') else 'custom'
+            }
+            for ag in all_agents
+        ]
         
-        # WorkflowStep 리스트로 변환 (각 스텝별 needsUserInput 포함)
-        workflow_steps = build_workflow_steps(planned_agents, agent_map)
+        # 프론트엔드에서 받은 planned_agents도 포함
+        for pa in planned_agents:
+            agent_id = pa.get('agentId')
+            if not any(a['id'] == agent_id for a in available_agents):
+                available_agents.append({
+                    "id": agent_id,
+                    "name": pa.get('agentName', f'Agent-{agent_id[:8]}'),
+                    "type": "custom"
+                })
         
-        print(f"[Server] Workflow steps: {[s.agent_name for s in workflow_steps]}")
+        print(f"[Server] Available agents for orchestration: {[a['name'] for a in available_agents]}")
         
-        # 멀티-에이전트 실행이 필요한 경우
-        if len(workflow_steps) >= 1:
-            print(f"[Server] Multi-agent workflow: {len(workflow_steps)} steps")
-            
-            # 워크플로우 생성 (async)
-            workflow = await workflow_manager.create_workflow(
-                task_id=task_id,
-                task_content=task_content,
-                steps=workflow_steps
-            )
-            
-            # 📝 로그: Planning 시작
-            ws_server.broadcast_agent_log(
-                agent_id=agent.id,
-                agent_name=agent.name,
-                log_type="info",
-                message=f"🔍 Orchestration: 멀티-에이전트 워크플로우 시작",
-                details=f"Task: {task_title}",
-                task_id=task_id
-            )
-            
-            # 실행 계획 로그
-            plan_details = "\n".join([
-                f"  Step {s.order}: {s.agent_name} ({s.description})" + 
-                (" [사용자 입력 필요]" if s.needs_user_input else "")
-                for s in workflow_steps
-            ])
-            ws_server.broadcast_agent_log(
-                agent_id=agent.id,
-                agent_name=agent.name,
-                log_type="decision",
-                message=f"📋 실행 계획 ({len(workflow_steps)}개 Agent)",
-                details=f"실행 순서:\n{plan_details}",
-                task_id=task_id
-            )
-            
-            # =====================================================
-            # 중앙 실행 루프 호출
-            # =====================================================
-            result = await orchestration_engine.run_workflow(task_id)
-            
-            if result is None:
-                # 사용자 입력 대기 중
-                print(f"[Server] Workflow paused for user input: {task_id}")
-                return
-            
-            # 워크플로우 완료 로그
-            ws_server.broadcast_agent_log(
-                agent_id=agent.id,
-                agent_name=agent.name,
-                log_type="info",
-                message="🎉 멀티-에이전트 워크플로우 완료",
-                details=f"실행된 Agent: {[s.agent_name for s in workflow_steps]}",
-                task_id=task_id
-            )
-            
-            # 완료된 워크플로우 정리
-            await workflow_manager.remove_workflow(task_id)
-            
-            print(f"[Server] Multi-agent workflow completed for task {task_id}")
-            return  # 여기서 종료
+        # =====================================================
+        # Dynamic Orchestration으로 요청 처리
+        # =====================================================
+        print(f"[Server] Starting Dynamic Orchestration for task: {task_title}")
+        
+        result = await dynamic_orchestration.process_request(
+            task_id=task_id,
+            request=task_content,
+            available_agents=available_agents,
+            slack_channel=slack_channel,
+            slack_ts=slack_ts
+        )
+        
+        if result is None:
+            # 사용자 입력 대기 중
+            print(f"[Server] Workflow paused for user input: {task_id}")
+            return
+        
+        print(f"[Server] Dynamic Orchestration completed for task {task_id}")
+        return  # 여기서 종료
         
         # =====================================================
         # 단일 Agent 처리 (기존 로직)
@@ -650,14 +635,32 @@ async def process_agent_task(agent, agent_input):
 
 async def main():
     global answer_agent, question_agent
-    
+
     print("=" * 50)
     print("Agent Monitor Server Starting...")
     print("=" * 50)
-    
-    # 0. 저장된 Agent 로드
-    print("\n[0/4] Loading saved agents...")
-    from utils.agent_storage import load_agents
+
+    # 0. Initialize Redis
+    print("\n[0/5] Initializing Redis...")
+    try:
+        await redis_service.connect()
+        is_healthy = await redis_service.health_check()
+        if is_healthy:
+            print("✅ Redis connected and healthy")
+        else:
+            print("⚠️  Redis connection established but health check failed")
+    except Exception as e:
+        print(f"❌ Redis connection failed: {e}")
+        print("⚠️  Server will continue without Redis (limited functionality)")
+
+    # 1. 저장된 Agent 로드 (Legacy - will be migrated to Redis)
+    print("\n[1/5] Loading saved agents...")
+    try:
+        from utils.agent_storage import load_agents
+    except ImportError:
+        print("⚠️  agent_storage.py not found (already migrated to Redis)")
+        load_agents = lambda: []
+
     from agents.types import AgentConfig, AgentExecutionContext
     from models.ontology import OntologyContext
     
@@ -1059,17 +1062,54 @@ async def main():
             # Agent 조회 - 실제 등록된 Agent만 사용
             agent = agent_registry.get_agent(agent_id)
             if not agent:
-                print(f"[Server] ERROR: Agent {agent_id} not found in registry")
-                print(f"[Server] Available agents: {[a.id for a in agent_registry.get_all_agents()]}")
-                # WebSocket으로 에러 메시지 전송
-                if ws_server:
-                    ws_server.broadcast_notification(
-                        f"Agent {agent_id} not found. Please create the agent first.",
-                        "error"
+                print(f"[Server] Agent {agent_id} not found in registry, auto-creating...")
+                
+                # planned_agents에서 해당 Agent 정보 찾기
+                agent_info = None
+                for pa in planned_agents:
+                    if pa.get('agentId') == agent_id:
+                        agent_info = pa
+                        break
+                
+                if agent_info:
+                    agent_name = agent_info.get('agentName', f'Agent-{agent_id[:8]}')
+                    print(f"[Server] Auto-creating agent: {agent_name} ({agent_id})")
+                    
+                    # Agent 자동 생성 (GenericAgent 사용)
+                    from agents.generic_agent import GenericAgent
+                    from agents.types import AgentConfig
+                    
+                    config = AgentConfig(
+                        name=agent_name,
+                        type='custom',
+                        description=f'Auto-created agent for task: {task_data.get("title", "Unknown")}',
+                        constraints=[],
+                        capabilities=['general'],
                     )
-                return
+                    
+                    agent = GenericAgent(config)
+                    # Agent ID를 프론트엔드에서 보낸 ID로 설정
+                    agent._id = agent_id
+                    agent._state.id = agent_id
+                    agent_registry.register_agent(agent)
+                    
+                    # WebSocket으로 Agent 업데이트 브로드캐스트
+                    if ws_server:
+                        ws_server.broadcast_agent_update(agent.get_state())
+                    
+                    print(f"[Server] Agent {agent_name} auto-created and registered")
+                else:
+                    print(f"[Server] ERROR: Agent {agent_id} not found in planned_agents either")
+                    print(f"[Server] Available agents: {[a.id for a in agent_registry.get_all_agents()]}")
+                    # WebSocket으로 에러 메시지 전송
+                    if ws_server:
+                        ws_server.broadcast_notification(
+                            f"Agent {agent_id} not found. Please create the agent first.",
+                            "error"
+                        )
+                    return
 
-            print(f"[Server] Found agent: {agent.name} ({agent.id})")
+            print(f"[Server] Found/Created agent: {agent.name} ({agent.id})")
 
             # Agent 초기화 및 시작 (아직 안 된 경우)
             if not hasattr(agent, 'context') or (hasattr(agent, 'context') and agent.context is None):
@@ -1642,8 +1682,41 @@ async def main():
             print(f"[Server] Processing task_interaction: taskId={task_id}, role={role}, message={user_message[:50]}...")
             
             # =====================================================
-            # 대기 중인 워크플로우가 있는지 확인 (workflow_manager 사용)
+            # Dynamic Orchestration에서 대기 중인 워크플로우 확인
             # =====================================================
+            if dynamic_orchestration.has_pending_workflow(task_id):
+                print(f"[Server] Found pending dynamic workflow for task {task_id}, resuming...")
+                
+                # Dynamic Orchestration 초기화
+                dynamic_orchestration.set_ws_server(ws_server)
+                
+                # 사용자 입력으로 워크플로우 재개
+                result = await dynamic_orchestration.resume_with_user_input(task_id, user_message)
+                
+                if result is None:
+                    # 또 다른 사용자 입력 대기 중
+                    print(f"[Server] Workflow paused again for user input: {task_id}")
+                    return
+                
+                # 워크플로우 완료
+                workflow = dynamic_orchestration.get_workflow(task_id)
+                if workflow:
+                    ws_server.broadcast_agent_log(
+                        agent_id="orchestrator-system",
+                        agent_name="Orchestration Agent",
+                        log_type="info",
+                        message="🎉 워크플로우 완료",
+                        details=f"사용자 입력: {user_message}",
+                        task_id=task_id
+                    )
+                
+                # 완료된 워크플로우 정리
+                dynamic_orchestration.remove_workflow(task_id)
+                
+                print(f"[Server] Dynamic workflow completed for task {task_id}")
+                return  # 워크플로우 처리 완료
+            
+            # 기존 workflow_manager 확인 (하위 호환성)
             if await workflow_manager.has_pending_workflow(task_id):
                 print(f"[Server] Found pending workflow for task {task_id}, resuming...")
                 
@@ -1811,17 +1884,6 @@ async def main():
                     specialist = plan_item['agent']
                     task_desc = plan_item['description']
                     
-                    # Step 시작 로그
-                    if ws_server:
-                        ws_server.broadcast_agent_log(
-                            agent_id=orchestration_agent.id,
-                            agent_name=orchestration_agent.name,
-                            log_type='info',
-                            message=f"▶️ Step {step_num}/{len(execution_plan)}: {specialist.name} 호출",
-                            details=f"작업: {task_desc}",
-                            task_id=task_id
-                        )
-                    
                     # Agent 작업 시작 로그
                     if ws_server:
                         ws_server.broadcast_agent_log(
@@ -1829,32 +1891,67 @@ async def main():
                             agent_name=specialist.name,
                             log_type='info',
                             message=f"🔧 작업 시작: {task_desc}",
-                            details=f"요청 내용: {user_message}",
+                            details=f"Step {step_num}/{len(execution_plan)}",
                             task_id=task_id
                         )
                     
-                    await asyncio.sleep(0.3)
+                    # 🆕 실제 LLM 호출로 Agent 작업 수행
+                    prev_results_text = ""
+                    if agent_results:
+                        prev_results_text = "\n\n이전 작업 결과:\n" + "\n".join([
+                            f"- {r['agent']}: {r['result']}" for r in agent_results
+                        ])
+                    
+                    agent_messages = [
+                        {
+                            "role": "system",
+                            "content": f"당신은 '{specialist.name}'입니다. {specialist.description if hasattr(specialist, 'description') else ''}\n주어진 작업을 수행하고 결과를 간결하게 요약해주세요."
+                        },
+                        {
+                            "role": "user",
+                            "content": f"""다음 작업을 수행해주세요:
+
+**사용자 요청**: {user_message}
+**담당 작업**: {task_desc}
+{prev_results_text}
+
+작업을 수행하고 결과를 간결하게 응답해주세요."""
+                        }
+                    ]
+                    
+                    llm_result = await call_llm(agent_messages, max_tokens=500)
+                    
+                    # 디버그: LLM 결과 로깅
+                    print(f"[Server] LLM result for {specialist.name}: {llm_result[:100] if llm_result else 'None'}...")
+                    
+                    # 결과 저장 - LLM 결과가 있으면 사용, 없으면 기본 메시지
+                    if llm_result and 'error' not in llm_result.lower():
+                        result_text = llm_result
+                    else:
+                        result_text = f"{task_desc} 작업이 수행되었습니다."
+                        print(f"[Server] Using fallback result for {specialist.name} due to LLM error or empty result")
                     
                     result = {
                         'agent': specialist.name,
                         'task': task_desc,
-                        'result': f"{task_desc} 완료"
+                        'result': result_text
                     }
                     
                     agent_results.append(result)
                     
                     # Agent 작업 완료 로그
                     if ws_server:
+                        result_preview = result['result'][:80] + "..." if len(result['result']) > 80 else result['result']
                         ws_server.broadcast_agent_log(
                             agent_id=specialist.id,
                             agent_name=specialist.name,
                             log_type='info',
-                            message=f"✅ 작업 완료: {result['result']}",
-                            details=f"다음 단계로 결과 전달",
+                            message=f"✅ 작업 완료",
+                            details=result_preview,
                             task_id=task_id
                         )
                     
-                    print(f"[Server] Step {step_num} completed: {specialist.name}")
+                    print(f"[Server] Step {step_num} completed: {specialist.name} - {result['result'][:50]}...")
                 
                 # =====================================================
                 # STEP 4: Answer Agent - 최종 종합 답변
@@ -1893,7 +1990,7 @@ async def main():
                     }
                 ]
                 
-                final_answer = await call_llm(llm_final_messages, max_tokens=1000, temperature=0.7)
+                final_answer = await call_llm(llm_final_messages, max_tokens=1000)
                 
                 if not final_answer or ("LLM" in final_answer and "오류" in final_answer):
                     # LLM 호출 실패 시 기본 메시지
@@ -1951,6 +2048,36 @@ async def main():
                         agent_id=None,
                         agent_name="System"
                     )
+        
+        elif message.type == WebSocketMessageType.UPDATE_LLM_CONFIG:
+            # 🆕 프론트엔드 LLM 설정 동기화
+            payload = message.payload
+            provider = payload.get('provider')
+            model = payload.get('model')
+            api_key = payload.get('apiKey')
+            base_url = payload.get('baseUrl')
+            temperature = payload.get('temperature')
+            max_tokens = payload.get('maxTokens')
+            
+            print(f"[Server] Received LLM config update: provider={provider}, model={model}, baseUrl={base_url}")
+            
+            # LLMClient 설정 업데이트
+            from agents.orchestration import LLMClient
+            llm_client = LLMClient()
+            updated = llm_client.update_config(
+                provider=provider,
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            
+            if updated and ws_server:
+                ws_server.broadcast_notification(
+                    f"LLM 설정이 업데이트되었습니다: {model}",
+                    "success"
+                )
         
         elif message.type == WebSocketMessageType.CHAT_MESSAGE:
             # 🆕 LLM Chat: Orchestration → Specialist (optional) → Answer Agent

@@ -40,7 +40,6 @@ export class OrchestrationService {
         id: agent.id,
         name: agent.name,
         type: agent.type,
-        description: agent.description || agent.name,
       }));
 
       const prompt = `다음 Task를 분석하여 필요한 Agent들을 순서대로 선택해주세요.
