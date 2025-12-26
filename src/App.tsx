@@ -214,6 +214,7 @@ function App() {
   const wsRef = useRef<WebSocket | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const processingTasksRef = useRef<Set<string>>(new Set()); // 현재 처리 중인 Task ID 추적
 
   // Orchestration Service 초기화
   useEffect(() => {
@@ -561,6 +562,12 @@ function App() {
     if (pendingTasks.length === 0 || !orchestrationServiceRef.current || allAgents.length === 0) return;
 
     pendingTasks.forEach(task => {
+      // 🆕 이미 처리 중인 Task는 건너뛰기
+      if (processingTasksRef.current.has(task.id)) {
+        console.log(`[App] Task ${task.id} is already being processed, skipping...`);
+        return;
+      }
+      
       // 자동 할당 조건:
       // 1. autoAssignMode가 'global'이고 autoAssign이 false가 아닌 경우
       // 2. autoAssignMode가 'manual'이고 autoAssign이 true인 경우
@@ -587,31 +594,44 @@ function App() {
           return;
         }
         
-        orchestrationServiceRef.current.selectAgentForTask(task, allAgents)
-          .then(agentId => {
-            if (agentId) {
+        // 🆕 처리 시작 표시
+        processingTasksRef.current.add(task.id);
+        console.log(`[App] Starting to process task ${task.id}...`);
+        
+        // 🆕 멀티-에이전트 Planning
+        orchestrationServiceRef.current.selectAgentsForTask(task, allAgents)
+          .then(plan => {
+            if (plan.agents.length > 0) {
+              const primaryAgentId = plan.agents[0].agentId;
+              
               // Task 상태 업데이트
               setTasks(prevTasks => {
                 const existingTask = prevTasks.find(t => t.id === task.id);
-                // 이미 할당되었거나 상태가 변경된 경우 건너뛰기
                 if (!existingTask || existingTask.assignedAgentId || existingTask.status !== 'pending') {
+                  console.log(`[App] Task ${task.id} already processed or not pending, skipping state update`);
                   return prevTasks;
                 }
                 
                 return prevTasks.map(t =>
                   t.id === task.id
-                    ? { ...t, assignedAgentId: agentId, status: 'in_progress', updatedAt: new Date() }
+                    ? { ...t, assignedAgentId: primaryAgentId, status: 'in_progress', updatedAt: new Date() }
                     : t
                 );
               });
               
-              // WebSocket 메시지 전송 (setTasks 외부에서)
+              // WebSocket 메시지 전송 - 멀티-에이전트 플랜 포함
               if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
                 const message = {
                   type: 'assign_task',
                   payload: {
                     taskId: task.id,
-                    agentId,
+                    agentId: primaryAgentId,
+                    // 🆕 멀티-에이전트 플랜 정보
+                    orchestrationPlan: {
+                      agents: plan.agents,
+                      needsUserInput: plan.needsUserInput,
+                      inputPrompt: plan.inputPrompt,
+                    },
                     task: {
                       id: task.id,
                       title: task.title,
@@ -624,16 +644,23 @@ function App() {
                   timestamp: new Date().toISOString(),
                 };
                 wsRef.current.send(JSON.stringify(message));
-                console.log(`[App] Auto-assigned and sent assign_task message:`, message);
+                console.log(`[App] Auto-assigned with multi-agent plan:`, message);
               } else {
                 console.warn(`[App] WebSocket not connected. Cannot send task assignment for task ${task.id}`);
               }
               
-              console.log(`[Orchestration] Auto-assigned task ${task.id} to agent ${agentId}`);
+              console.log(`[Orchestration] Multi-agent plan for task ${task.id}:`, plan.agents.map(a => a.agentName));
+            } else {
+              console.warn(`[App] No agents selected for task ${task.id}`);
             }
           })
           .catch(error => {
             console.error('[Orchestration] Error in auto-assignment:', error);
+          })
+          .finally(() => {
+            // 🆕 처리 완료 - ref에서 제거
+            processingTasksRef.current.delete(task.id);
+            console.log(`[App] Finished processing task ${task.id}`);
           });
       }
     });

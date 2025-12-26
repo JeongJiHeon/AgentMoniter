@@ -27,6 +27,7 @@ export function CreateAgentModal({
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationError, setGenerationError] = useState<string | null>(null);
   const [generationSuccess, setGenerationSuccess] = useState(false);
+  const [autoGenerate, setAutoGenerate] = useState(true); // 맞춤 생성 토글
 
   const agentTypes = [
     { value: 'general', label: '범용', description: '다양한 작업을 수행하는 범용 Agent' },
@@ -51,6 +52,7 @@ export function CreateAgentModal({
         setGenerationError(null);
         setGenerationSuccess(false);
         setIsGenerating(false);
+        setAutoGenerate(true);
       }, 300);
       return () => clearTimeout(timer);
     }
@@ -186,38 +188,55 @@ export function CreateAgentModal({
               <label className="block text-sm font-medium text-slate-300 mb-2">
                 설명
               </label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  className="flex-1 px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-blue-500"
-                  placeholder="Agent가 수행하는 역할에 대한 간단한 설명"
-                />
+              <input
+                type="text"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-blue-500"
+                placeholder="Agent가 수행하는 역할에 대한 간단한 설명"
+              />
+              
+              {/* AI 맞춤 생성 토글 - 설명 바로 아래 */}
+              <div className="mt-2 flex items-center gap-2">
                 <button
-                  onClick={handleGenerateConfig}
-                  disabled={!name.trim() || !description.trim() || isGenerating}
-                  className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap flex items-center gap-2"
-                  title="이름과 설명을 바탕으로 Agent 설정을 자동 생성합니다"
+                  onClick={() => setAutoGenerate(!autoGenerate)}
+                  className={`relative w-9 h-5 rounded-full transition-colors ${
+                    autoGenerate ? 'bg-purple-600' : 'bg-slate-600'
+                  }`}
                 >
-                  {isGenerating ? (
-                    <>
-                      <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                      </svg>
-                      <span>생성 중...</span>
-                    </>
-                  ) : (
-                    <>
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                      </svg>
-                      <span>맞춤 생성</span>
-                    </>
-                  )}
+                  <span
+                    className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${
+                      autoGenerate ? 'left-[18px]' : 'left-0.5'
+                    }`}
+                  />
                 </button>
+                <span className="text-sm text-slate-400">AI 맞춤 생성</span>
+                {autoGenerate && (
+                  <button
+                    onClick={handleGenerateConfig}
+                    disabled={!name.trim() || !description.trim() || isGenerating}
+                    className="ml-auto px-3 py-1 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+                  >
+                    {isGenerating ? (
+                      <>
+                        <svg className="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        <span>생성 중...</span>
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                        </svg>
+                        <span>생성</span>
+                      </>
+                    )}
+                  </button>
+                )}
               </div>
+              
               {generationError && (
                 <p className="mt-2 text-sm text-red-400 flex items-center gap-2">
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -231,12 +250,7 @@ export function CreateAgentModal({
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                   </svg>
-                  Agent 설정이 자동으로 생성되었습니다!
-                </p>
-              )}
-              {!isGenerating && !generationSuccess && name.trim() && description.trim() && (
-                <p className="mt-1 text-xs text-slate-500">
-                  💡 "맞춤 생성" 버튼을 클릭하면 LLM이 Agent 설정을 자동으로 생성합니다.
+                  설정이 자동 생성되었습니다!
                 </p>
               )}
             </div>

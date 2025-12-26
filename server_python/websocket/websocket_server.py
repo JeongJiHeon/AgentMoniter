@@ -49,6 +49,7 @@ class AgentMonitorWebSocketServer:
         self.server: Optional[websockets.server.Serve] = None
         self.heartbeat_task: Optional[asyncio.Task] = None
         self.on_client_action: Optional[Callable[[str, WebSocketMessage], None]] = None
+        self._recent_tasks: Dict[str, dict] = {}  # 최근 Task 저장소 (task_id -> task_data)
     
     async def start(self) -> None:
         """서버 시작"""
@@ -107,6 +108,17 @@ class AgentMonitorWebSocketServer:
                 payload=agent.model_dump(mode="json") if hasattr(agent, 'model_dump') else agent
             ))
         
+        # 🆕 최근 대기 중인 Task 목록 전송 (재연결 시 누락된 Task 복구)
+        pending_tasks = [task for task in self._recent_tasks.values() 
+                        if task.get('status') == 'pending']
+        if pending_tasks:
+            print(f"[WebSocket] Sending {len(pending_tasks)} pending tasks to client {client_id}")
+            for task in pending_tasks:
+                await self._send_to_client(client_id, WebSocketMessage(
+                    type=WebSocketMessageType.TASK_CREATED,
+                    payload=task
+                ))
+        
         try:
             # Pong 핸들러 설정
             async def pong_handler():
@@ -145,7 +157,7 @@ class AgentMonitorWebSocketServer:
         finally:
             if client_id in self.clients:
                 del self.clients[client_id]
-            print(f"[WebSocket] Client disconnected: {client_id}")
+            # 연결 해제 로그는 디버그 시에만 필요
     
     async def _handle_message(self, client_id: str, message: WebSocketMessage) -> None:
         """메시지 처리"""
@@ -300,8 +312,12 @@ class AgentMonitorWebSocketServer:
                     "completedAt": getattr(task, 'completedAt', None).isoformat() if hasattr(task, 'completedAt') and task.completedAt else None,
                 }
             
+            # 🆕 Task를 저장소에 저장 (재연결 시 복구용)
+            task_id = task_dict.get('id')
+            if task_id:
+                self._recent_tasks[task_id] = task_dict
+            
             print(f"[WebSocket] Broadcasting task_created: {task_dict.get('title', 'Unknown')}")
-            print(f"[WebSocket] Active clients: {len(self.clients)}")
             
             self._broadcast(WebSocketMessage(
                 type="task_created",
@@ -311,6 +327,16 @@ class AgentMonitorWebSocketServer:
             print(f"[WebSocket] Error broadcasting task_created: {e}")
             import traceback
             traceback.print_exc()
+    
+    def update_task_status(self, task_id: str, status: str) -> None:
+        """Task 상태 업데이트 (저장소 동기화)"""
+        if task_id in self._recent_tasks:
+            self._recent_tasks[task_id]['status'] = status
+    
+    def remove_task(self, task_id: str) -> None:
+        """완료된 Task 저장소에서 제거"""
+        if task_id in self._recent_tasks:
+            del self._recent_tasks[task_id]
     
     def broadcast_task_interaction(self, task_id: str, role: str, message: str, agent_id: str = None, agent_name: str = None) -> None:
         """Task 상호작용 메시지 브로드캐스트"""
@@ -355,6 +381,18 @@ class AgentMonitorWebSocketServer:
             payload=chat_message
         ))
     
+    def broadcast_message(self, message_dict: dict) -> None:
+        """일반 메시지 브로드캐스트 (type, payload 포함)"""
+        msg_type = message_dict.get('type', 'unknown')
+        payload = message_dict.get('payload', {})
+        
+        print(f"[WebSocket] Broadcasting message: {msg_type}")
+        
+        self._broadcast(WebSocketMessage(
+            type=msg_type,
+            payload=payload
+        ))
+    
     # === 유틸리티 ===
     
     def _broadcast(self, message: WebSocketMessage) -> None:
@@ -378,8 +416,8 @@ class AgentMonitorWebSocketServer:
         if client:
             try:
                 await client.websocket.send(json.dumps(message.to_dict()))
-            except Exception as e:
-                print(f"[WebSocket] Failed to send to client {client_id}: {e}")
+            except Exception:
+                pass  # 클라이언트가 이미 연결 해제된 경우 무시
     
     def get_client_count(self) -> int:
         """연결된 클라이언트 수"""
