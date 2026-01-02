@@ -29,13 +29,15 @@ const statusColors: Record<TaskStatus, string> = {
   pending: 'border-slate-600',
   in_progress: 'border-blue-500',
   completed: 'border-green-500 opacity-60',
-  cancelled: 'border-red-500 opacity-50',
+  cancelled: 'border-slate-500 opacity-50',
+  failed: 'border-red-500 opacity-70',
 };
 
 // 상태에 따른 행동 유도 메시지
 const getActionMessage = (task: Task, assignedAgent?: Agent, allAgents?: Agent[]): string => {
   if (task.status === 'completed') return 'Completed';
   if (task.status === 'cancelled') return 'Cancelled';
+  if (task.status === 'failed') return 'Failed';
   if (!task.assignedAgentId) return 'No agent assigned';
   if (task.status === 'pending') return 'Waiting to start';
   if (task.status === 'in_progress') {
@@ -212,7 +214,7 @@ export function TaskCard({ task, agents, onStatusChange, onUpdate, onDelete, onA
                 Assign Agent
               </button>
             )}
-            {task.status !== 'completed' && task.status !== 'cancelled' && (
+            {task.status !== 'completed' && task.status !== 'cancelled' && task.status !== 'failed' && (
               <button
                 onClick={(e) => {
                   e.stopPropagation();

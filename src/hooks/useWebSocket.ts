@@ -226,6 +226,34 @@ export function useWebSocket({
             break;
           }
 
+          case 'task_events_response': {
+            const payload = message.payload;
+            const taskId = payload.taskId;
+            const events = payload.events || [];
+            console.log(`[WebSocket] Received ${events.length} task events for task ${taskId}`);
+
+            // Process each event and add to agent logs
+            for (const event of events) {
+              if (event.type === 'agent_log' && event.payload) {
+                const eventPayload = event.payload;
+                const agentLog: AgentLog = {
+                  id: eventPayload.id || crypto.randomUUID(),
+                  agentId: eventPayload.agentId,
+                  agentName: eventPayload.agentName,
+                  type: eventPayload.type,
+                  message: eventPayload.message,
+                  details: eventPayload.details,
+                  relatedTaskId: taskId,
+                  timestamp: typeof eventPayload.timestamp === 'string'
+                    ? new Date(eventPayload.timestamp)
+                    : new Date(),
+                };
+                addAgentLog(agentLog);
+              }
+            }
+            break;
+          }
+
           default:
             console.log('[WebSocket] Unknown message type:', message.type);
         }

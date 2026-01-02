@@ -14,6 +14,9 @@ interface WebSocketState {
 
   // Helper
   sendMessage: (message: Record<string, unknown>) => void;
+
+  // Task-specific event requests
+  requestTaskEvents: (taskId: string) => void;
 }
 
 export const useWebSocketStore = create<WebSocketState>((set, get) => ({
@@ -40,6 +43,21 @@ export const useWebSocketStore = create<WebSocketState>((set, get) => ({
       console.log('[WebSocketStore] Message sent:', message);
     } else {
       console.warn('[WebSocketStore] Cannot send message: WebSocket not connected');
+    }
+  },
+
+  // Request task-specific events
+  requestTaskEvents: (taskId: string) => {
+    const { ws, isConnected } = get();
+    if (ws && isConnected && ws.readyState === WebSocket.OPEN) {
+      const message = {
+        type: 'request_task_events',
+        payload: { taskId }
+      };
+      ws.send(JSON.stringify(message));
+      console.log('[WebSocketStore] Requested task events for:', taskId);
+    } else {
+      console.warn('[WebSocketStore] Cannot request task events: WebSocket not connected');
     }
   },
 }));

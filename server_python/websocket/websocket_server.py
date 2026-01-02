@@ -119,6 +119,7 @@ class AgentMonitorWebSocketServer:
             ))
 
         # 🆕 Event replay: Send recent events from Redis
+        # agent_log 이벤트는 제외 (task별로 요청 시에만 전송)
         try:
             # Check if client has cursor (reconnection)
             cursor = await self.event_store.redis_service.get_client_cursor(client_id)
@@ -127,9 +128,11 @@ class AgentMonitorWebSocketServer:
                 # Reconnection: Replay missed events
                 print(f"[WebSocket] Client {client_id} reconnected, replaying events since {cursor}")
                 missed_events = await self.event_store.get_events_since(float(cursor), limit=1000)
-                print(f"[WebSocket] Replaying {len(missed_events)} missed events")
+                # agent_log 제외 (task별 요청으로 처리)
+                filtered_events = [e for e in missed_events if e.get("type") != "agent_log"]
+                print(f"[WebSocket] Replaying {len(filtered_events)} missed events (excluded agent_log)")
 
-                for event in missed_events:
+                for event in filtered_events:
                     await self._send_to_client(client_id, WebSocketMessage(
                         type=event.get("type", "unknown"),
                         payload=event.get("payload", {}),
@@ -137,11 +140,14 @@ class AgentMonitorWebSocketServer:
                     ))
             else:
                 # New connection: Send recent events (last 100)
+                # agent_log 제외 - task details 패널에서 task별로 요청
                 print(f"[WebSocket] New client {client_id}, sending recent events")
                 recent_events = await self.event_store.get_recent_events(count=100)
-                print(f"[WebSocket] Sending {len(recent_events)} recent events")
+                # agent_log 제외 (task별 요청으로 처리)
+                filtered_events = [e for e in recent_events if e.get("type") != "agent_log"]
+                print(f"[WebSocket] Sending {len(filtered_events)} recent events (excluded agent_log)")
 
-                for event in recent_events:
+                for event in filtered_events:
                     await self._send_to_client(client_id, WebSocketMessage(
                         type=event.get("type", "unknown"),
                         payload=event.get("payload", {}),
@@ -195,6 +201,11 @@ class AgentMonitorWebSocketServer:
         print(f"[WebSocket] Message from {client_id}: {message.type}")
 
         try:
+            # Task별 이벤트 요청 처리
+            if message.type == "request_task_events":
+                await self._handle_request_task_events(client_id, message.payload)
+                return
+
             # 클라이언트 -> 서버 메시지 처리
             if message.type in [
                 WebSocketMessageType.ASSIGN_TASK,
@@ -219,6 +230,44 @@ class AgentMonitorWebSocketServer:
             import traceback
             traceback.print_exc()
             # 에러가 발생해도 연결은 유지
+
+    async def _handle_request_task_events(self, client_id: str, payload: dict) -> None:
+        """
+        Task별 이벤트 요청 처리
+
+        클라이언트가 특정 task의 이벤트만 요청할 때 사용
+        이전 task의 로그가 섞이지 않도록 task_id로 필터링
+        """
+        task_id = payload.get("taskId") or payload.get("task_id")
+        if not task_id:
+            print(f"[WebSocket] request_task_events: No task_id provided")
+            return
+
+        try:
+            # Task별 이벤트 조회
+            task_events = await self.event_store.get_task_events(task_id)
+            print(f"[WebSocket] Sending {len(task_events)} events for task {task_id}")
+
+            # 클라이언트에 task_events_response 전송
+            await self._send_to_client(client_id, WebSocketMessage(
+                type="task_events_response",
+                payload={
+                    "taskId": task_id,
+                    "events": task_events,
+                    "count": len(task_events)
+                }
+            ))
+        except Exception as e:
+            print(f"[WebSocket] Error fetching task events: {e}")
+            await self._send_to_client(client_id, WebSocketMessage(
+                type="task_events_response",
+                payload={
+                    "taskId": task_id,
+                    "events": [],
+                    "count": 0,
+                    "error": str(e)
+                }
+            ))
     
     async def _heartbeat_loop(self) -> None:
         """Heartbeat 체크 (30초마다)"""
@@ -296,10 +345,10 @@ class AgentMonitorWebSocketServer:
         ))
     
     def broadcast_agent_log(self, agent_id: str, agent_name: str, log_type: str, message: str, details: str = None, task_id: str = None) -> None:
-        """Agent 로그 브로드캐스트"""
+        """Agent 로그 브로드캐스트 (Event Store에 저장)"""
         from uuid import uuid4
         from datetime import datetime
-        
+
         log_message = {
             "id": str(uuid4()),
             "agentId": agent_id,
@@ -310,11 +359,12 @@ class AgentMonitorWebSocketServer:
             "relatedTaskId": task_id,
             "timestamp": datetime.now().isoformat()
         }
-        
+
         print(f"[WebSocket] Broadcasting agent_log: {agent_name} - {log_type} - {message[:50]}... (taskId: {task_id})")
-        
-        self._broadcast(WebSocketMessage(
-            type="agent_log",
+
+        # 🔴 Event Store에 저장 후 broadcast (클라이언트가 없어도 저장됨)
+        asyncio.create_task(self._broadcast_with_store(
+            message_type="agent_log",
             payload=log_message
         ))
     
@@ -371,10 +421,10 @@ class AgentMonitorWebSocketServer:
             del self._recent_tasks[task_id]
     
     def broadcast_task_interaction(self, task_id: str, role: str, message: str, agent_id: str = None, agent_name: str = None) -> None:
-        """Task 상호작용 메시지 브로드캐스트"""
+        """Task 상호작용 메시지 브로드캐스트 (Event Store에 저장)"""
         from uuid import uuid4
         from datetime import datetime
-        
+
         interaction_message = {
             "id": str(uuid4()),
             "taskId": task_id,
@@ -384,11 +434,12 @@ class AgentMonitorWebSocketServer:
             "agentName": agent_name,
             "timestamp": datetime.now().isoformat()
         }
-        
+
         print(f"[WebSocket] Broadcasting task_interaction: taskId={task_id}, role={role}, message={message[:50]}...")
-        
-        self._broadcast(WebSocketMessage(
-            type=WebSocketMessageType.TASK_INTERACTION,
+
+        # 🔴 Event Store에 저장 후 broadcast (클라이언트가 없어도 저장됨)
+        asyncio.create_task(self._broadcast_with_store(
+            message_type=WebSocketMessageType.TASK_INTERACTION,
             payload=interaction_message
         ))
     
@@ -417,30 +468,78 @@ class AgentMonitorWebSocketServer:
         """일반 메시지 브로드캐스트 (type, payload 포함)"""
         msg_type = message_dict.get('type', 'unknown')
         payload = message_dict.get('payload', {})
-        
+
         print(f"[WebSocket] Broadcasting message: {msg_type}")
-        
+
         self._broadcast(WebSocketMessage(
             type=msg_type,
             payload=payload
         ))
-    
+
+    # === Task/Agent 상태 브로드캐스트 (TaskStateManager 연동) ===
+
+    def broadcast_task_status_change(self, event: dict) -> None:
+        """Task 상태 변경 브로드캐스트"""
+        print(f"[WebSocket] Broadcasting task_status_change: {event.get('task_id')} -> {event.get('new_status')}")
+
+        asyncio.create_task(self._broadcast_with_store(
+            message_type="task_status_change",
+            payload=event
+        ))
+
+    def broadcast_agent_status_change(self, agent_status: dict) -> None:
+        """Agent 상태 변경 브로드캐스트"""
+        print(f"[WebSocket] Broadcasting agent_status_change: {agent_status.get('agent_name')} -> {agent_status.get('status')}")
+
+        asyncio.create_task(self._broadcast_with_store(
+            message_type="agent_status_change",
+            payload=agent_status
+        ))
+
+    def broadcast_task_summary(self, summary: dict) -> None:
+        """전체 Task 상태 요약 브로드캐스트"""
+        print(f"[WebSocket] Broadcasting task_summary: running={summary.get('counts', {}).get('running', 0)}")
+
+        self._broadcast(WebSocketMessage(
+            type="task_summary",
+            payload=summary
+        ))
+
+    def broadcast_agent_summary(self, summary: dict) -> None:
+        """전체 Agent 상태 요약 브로드캐스트"""
+        print(f"[WebSocket] Broadcasting agent_summary: running={summary.get('counts', {}).get('running', 0)}")
+
+        self._broadcast(WebSocketMessage(
+            type="agent_summary",
+            payload=summary
+        ))
+
     # === 유틸리티 ===
     
     async def _broadcast_with_store(self, message_type: str, payload: dict) -> None:
         """
-        Store event to Redis FIRST, then broadcast to clients
-        This ensures event persistence before delivery
+        🔴 Message Queueing Logic:
+        1. Store event to Redis FIRST (even if no clients connected)
+        2. Broadcast to connected clients (if any)
+        3. Update client cursors
+
+        This ensures:
+        - Messages are never lost
+        - Reconnected clients receive missed messages via event replay
         """
         try:
-            # 1. Store to Redis event store
+            # 1. Store to Redis event store (ALWAYS, even if no clients)
             timestamp = await self.event_store.store_event(message_type, payload)
+
+            if not self.clients:
+                print(f"[WebSocket] No clients connected, message stored to Event Store (will be replayed on reconnect)")
+                return
 
             # 2. Broadcast to connected clients
             message = WebSocketMessage(type=message_type, payload=payload)
             self._broadcast(message)
 
-            # 3. Update client cursors
+            # 3. Update client cursors (so they know what events they've received)
             for client_id in self.clients.keys():
                 try:
                     await self.event_store.redis_service.save_client_cursor(client_id, str(timestamp))
@@ -449,9 +548,12 @@ class AgentMonitorWebSocketServer:
 
         except Exception as e:
             print(f"[WebSocket] _broadcast_with_store error: {e}")
+            import traceback
+            traceback.print_exc()
             # Fallback: still broadcast even if Redis fails
-            message = WebSocketMessage(type=message_type, payload=payload)
-            self._broadcast(message)
+            if self.clients:
+                message = WebSocketMessage(type=message_type, payload=payload)
+                self._broadcast(message)
 
     def _broadcast(self, message: WebSocketMessage) -> None:
         """모든 클라이언트에 브로드캐스트 (internal use only)"""

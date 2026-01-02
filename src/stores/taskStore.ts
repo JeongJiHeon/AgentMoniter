@@ -19,6 +19,14 @@ interface TaskState {
   updateTask: (id: string, updates: Partial<Task>) => void;
   deleteTask: (id: string) => void;
 
+  // Bulk operations
+  clearAllTasks: () => void;
+  deleteCompletedTasks: () => void;
+  deleteCancelledTasks: () => void;
+  deleteTasksByStatus: (status: string) => void;
+  clearAllLogs: () => void;
+  clearTaskLogs: (taskId: string) => void;
+
   // Processing tracking
   markTaskAsProcessing: (id: string) => void;
   unmarkTaskAsProcessing: (id: string) => void;
@@ -37,6 +45,7 @@ interface TaskState {
 
   // Agent logs
   addAgentLog: (log: AgentLog) => void;
+  setAgentLogs: (logs: AgentLog[]) => void;
   getTaskLogs: (taskId: string) => AgentLog[];
 }
 
@@ -93,8 +102,79 @@ export const useTaskStore = create<TaskState>((set, get) => {
       set((state) => {
         const updated = state.tasks.filter((task) => task.id !== id);
         saveToLocalStorage('TASKS', updated);
-        return { tasks: updated };
+        // Also clean up related data
+        const filteredLogs = state.agentLogs.filter(log => log.relatedTaskId !== id);
+        const filteredMessages = state.taskChatMessages.filter(msg => msg.taskId !== id);
+        const filteredInteractions = state.interactions.filter(i => i.taskId !== id);
+        return {
+          tasks: updated,
+          agentLogs: filteredLogs,
+          taskChatMessages: filteredMessages,
+          interactions: filteredInteractions
+        };
       }),
+
+    // Bulk operations
+    clearAllTasks: () =>
+      set(() => {
+        saveToLocalStorage('TASKS', []);
+        return {
+          tasks: [],
+          agentLogs: [],
+          taskChatMessages: [],
+          interactions: [],
+          processingTaskIds: new Set()
+        };
+      }),
+
+    deleteCompletedTasks: () =>
+      set((state) => {
+        const completedIds = state.tasks.filter(t => t.status === 'completed').map(t => t.id);
+        const updated = state.tasks.filter(t => t.status !== 'completed');
+        saveToLocalStorage('TASKS', updated);
+        return {
+          tasks: updated,
+          agentLogs: state.agentLogs.filter(log => !completedIds.includes(log.relatedTaskId || '')),
+          taskChatMessages: state.taskChatMessages.filter(msg => !completedIds.includes(msg.taskId)),
+          interactions: state.interactions.filter(i => !completedIds.includes(i.taskId))
+        };
+      }),
+
+    deleteCancelledTasks: () =>
+      set((state) => {
+        const cancelledIds = state.tasks.filter(t => t.status === 'cancelled').map(t => t.id);
+        const updated = state.tasks.filter(t => t.status !== 'cancelled');
+        saveToLocalStorage('TASKS', updated);
+        return {
+          tasks: updated,
+          agentLogs: state.agentLogs.filter(log => !cancelledIds.includes(log.relatedTaskId || '')),
+          taskChatMessages: state.taskChatMessages.filter(msg => !cancelledIds.includes(msg.taskId)),
+          interactions: state.interactions.filter(i => !cancelledIds.includes(i.taskId))
+        };
+      }),
+
+    deleteTasksByStatus: (status) =>
+      set((state) => {
+        const targetIds = state.tasks.filter(t => t.status === status).map(t => t.id);
+        const updated = state.tasks.filter(t => t.status !== status);
+        saveToLocalStorage('TASKS', updated);
+        return {
+          tasks: updated,
+          agentLogs: state.agentLogs.filter(log => !targetIds.includes(log.relatedTaskId || '')),
+          taskChatMessages: state.taskChatMessages.filter(msg => !targetIds.includes(msg.taskId)),
+          interactions: state.interactions.filter(i => !targetIds.includes(i.taskId))
+        };
+      }),
+
+    clearAllLogs: () =>
+      set(() => ({
+        agentLogs: []
+      })),
+
+    clearTaskLogs: (taskId) =>
+      set((state) => ({
+        agentLogs: state.agentLogs.filter(log => log.relatedTaskId !== taskId)
+      })),
 
     // Processing tracking
     markTaskAsProcessing: (id) =>
@@ -159,6 +239,9 @@ export const useTaskStore = create<TaskState>((set, get) => {
         }
         return { agentLogs: [...state.agentLogs, log] };
       }),
+
+    setAgentLogs: (logs) =>
+      set(() => ({ agentLogs: logs })),
 
     getTaskLogs: (taskId) =>
       get().agentLogs.filter((log) => log.relatedTaskId === taskId),

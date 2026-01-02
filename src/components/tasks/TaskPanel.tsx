@@ -17,6 +17,9 @@ interface TaskPanelProps {
   onCreateTask: (task: CreateTaskInput) => void;
   onUpdateTask: (id: string, updates: Partial<Task>) => void;
   onDeleteTask: (id: string) => void;
+  onClearAllTasks?: () => void;
+  onDeleteCompletedTasks?: () => void;
+  onClearAllLogs?: () => void;
   onAssignAgent?: (taskId: string, agentId: string) => void;
   onRespondInteraction?: (interactionId: string, response: string) => void;
   onSendTaskMessage?: (taskId: string, message: string) => void;
@@ -37,6 +40,9 @@ export function TaskPanel({
   onCreateTask,
   onUpdateTask,
   onDeleteTask,
+  onClearAllTasks,
+  onDeleteCompletedTasks,
+  onClearAllLogs,
   onAssignAgent,
   onRespondInteraction,
   onSendTaskMessage,
@@ -48,9 +54,11 @@ export function TaskPanel({
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isAnalyzeModalOpen, setIsAnalyzeModalOpen] = useState(false);
   const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
+  const [isManagementPanelOpen, setIsManagementPanelOpen] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [filterStatus, setFilterStatus] = useState<TaskStatus | 'all'>('all');
   const [filterPriority, setFilterPriority] = useState<TaskPriority | 'all'>('all');
+  const [showAllTasks, setShowAllTasks] = useState(false);
 
   const filteredTasks = tasks.filter(task => {
     if (filterStatus !== 'all' && task.status !== filterStatus) return false;
@@ -61,6 +69,18 @@ export function TaskPanel({
   const pendingTasks = filteredTasks.filter(t => t.status === 'pending');
   const inProgressTasks = filteredTasks.filter(t => t.status === 'in_progress');
   const completedTasks = filteredTasks.filter(t => t.status === 'completed');
+  const cancelledTasks = filteredTasks.filter(t => t.status === 'cancelled');
+  const failedTasksList = filteredTasks.filter(t => t.status === 'failed');
+
+  // Count tasks by status for management panel
+  const taskCounts = {
+    total: tasks.length,
+    pending: tasks.filter(t => t.status === 'pending').length,
+    in_progress: tasks.filter(t => t.status === 'in_progress').length,
+    completed: tasks.filter(t => t.status === 'completed').length,
+    cancelled: tasks.filter(t => t.status === 'cancelled').length,
+    failed: tasks.filter(t => t.status === 'failed').length,
+  };
 
   // Attention metrics
   const tasksNeedingApproval = approvalRequests.filter(req =>
@@ -178,6 +198,130 @@ export function TaskPanel({
           </svg>
           MCP 메시지 분석
         </button>
+
+        {/* Task Management Button */}
+        <div className="relative">
+          <button
+            onClick={() => setIsManagementPanelOpen(!isManagementPanelOpen)}
+            className={`px-6 py-3 ${isManagementPanelOpen ? 'bg-slate-600' : 'bg-slate-700 hover:bg-slate-600'} text-white rounded-lg transition-colors flex items-center justify-center gap-2 font-medium`}
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+            Task 관리
+            {tasks.length > 0 && (
+              <span className="ml-1 px-2 py-0.5 bg-slate-500 text-xs rounded-full">{tasks.length}</span>
+            )}
+          </button>
+
+          {/* Management Dropdown */}
+          {isManagementPanelOpen && (
+            <div className="absolute top-full right-0 mt-2 w-72 bg-slate-800 border border-slate-600 rounded-lg shadow-xl z-50">
+              <div className="p-4 border-b border-slate-600">
+                <h4 className="text-sm font-semibold text-white mb-3">Task 현황</h4>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="flex justify-between px-2 py-1 bg-slate-700/50 rounded">
+                    <span className="text-slate-400">전체</span>
+                    <span className="text-white font-medium">{taskCounts.total}</span>
+                  </div>
+                  <div className="flex justify-between px-2 py-1 bg-yellow-500/10 rounded">
+                    <span className="text-yellow-400">대기</span>
+                    <span className="text-yellow-400 font-medium">{taskCounts.pending}</span>
+                  </div>
+                  <div className="flex justify-between px-2 py-1 bg-blue-500/10 rounded">
+                    <span className="text-blue-400">진행</span>
+                    <span className="text-blue-400 font-medium">{taskCounts.in_progress}</span>
+                  </div>
+                  <div className="flex justify-between px-2 py-1 bg-green-500/10 rounded">
+                    <span className="text-green-400">완료</span>
+                    <span className="text-green-400 font-medium">{taskCounts.completed}</span>
+                  </div>
+                  <div className="flex justify-between px-2 py-1 bg-slate-500/10 rounded">
+                    <span className="text-slate-400">취소</span>
+                    <span className="text-slate-400 font-medium">{taskCounts.cancelled}</span>
+                  </div>
+                  <div className="flex justify-between px-2 py-1 bg-red-500/10 rounded">
+                    <span className="text-red-400">실패</span>
+                    <span className="text-red-400 font-medium">{taskCounts.failed}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-3 space-y-2">
+                <button
+                  onClick={() => {
+                    setShowAllTasks(!showAllTasks);
+                    setIsManagementPanelOpen(false);
+                  }}
+                  className="w-full px-3 py-2 text-sm text-left text-white hover:bg-slate-700 rounded flex items-center gap-2"
+                >
+                  <svg className="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+                  </svg>
+                  {showAllTasks ? '카테고리별 보기' : '전체 Task 목록 보기'}
+                </button>
+
+                <hr className="border-slate-600" />
+
+                <button
+                  onClick={() => {
+                    if (onDeleteCompletedTasks && taskCounts.completed > 0) {
+                      if (confirm(`완료된 ${taskCounts.completed}개 Task를 삭제하시겠습니까?`)) {
+                        onDeleteCompletedTasks();
+                      }
+                    }
+                    setIsManagementPanelOpen(false);
+                  }}
+                  disabled={taskCounts.completed === 0}
+                  className="w-full px-3 py-2 text-sm text-left text-green-400 hover:bg-slate-700 rounded flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  완료된 Task 삭제 ({taskCounts.completed})
+                </button>
+
+                <button
+                  onClick={() => {
+                    if (onClearAllLogs) {
+                      if (confirm('모든 로그를 삭제하시겠습니까?')) {
+                        onClearAllLogs();
+                      }
+                    }
+                    setIsManagementPanelOpen(false);
+                  }}
+                  className="w-full px-3 py-2 text-sm text-left text-amber-400 hover:bg-slate-700 rounded flex items-center gap-2"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  모든 로그 삭제
+                </button>
+
+                <hr className="border-slate-600" />
+
+                <button
+                  onClick={() => {
+                    if (onClearAllTasks && taskCounts.total > 0) {
+                      if (confirm(`정말로 모든 ${taskCounts.total}개 Task를 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.`)) {
+                        onClearAllTasks();
+                      }
+                    }
+                    setIsManagementPanelOpen(false);
+                  }}
+                  disabled={taskCounts.total === 0}
+                  className="w-full px-3 py-2 text-sm text-left text-red-400 hover:bg-slate-700 rounded flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                  모든 Task 삭제 ({taskCounts.total})
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* 자동 할당 토글 */}
@@ -227,6 +371,8 @@ export function TaskPanel({
           <option value="pending">대기 중</option>
           <option value="in_progress">진행 중</option>
           <option value="completed">완료</option>
+          <option value="cancelled">취소됨</option>
+          <option value="failed">실패</option>
         </select>
         <select
           value={filterPriority}
@@ -254,6 +400,39 @@ export function TaskPanel({
             <p className="text-sm text-slate-600">
               {tasks.length === 0 && '새 Task를 생성하거나 MCP 메시지를 분석해보세요'}
             </p>
+          </div>
+        ) : showAllTasks ? (
+          /* 전체 Task 목록 보기 */
+          <div>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-sm font-semibold text-slate-300 uppercase flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-slate-400"></span>
+                전체 Task ({filteredTasks.length})
+              </h3>
+              <button
+                onClick={() => setShowAllTasks(false)}
+                className="text-xs text-blue-400 hover:text-blue-300"
+              >
+                카테고리별 보기
+              </button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {filteredTasks.map(task => (
+                <TaskCard
+                  key={task.id}
+                  task={task}
+                  agents={agents}
+                  onStatusChange={handleStatusChange}
+                  onUpdate={onUpdateTask}
+                  onDelete={onDeleteTask}
+                  onAssignAgent={onAssignAgent}
+                  onViewDetail={handleViewDetail}
+                  autoAssignMode={autoAssignMode}
+                  taskChatMessages={taskChatMessages}
+                  onSendTaskMessage={onSendTaskMessage}
+                />
+              ))}
+            </div>
           </div>
         ) : (
           <>
@@ -317,6 +496,58 @@ export function TaskPanel({
                 </h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {completedTasks.map(task => (
+                    <TaskCard
+                      key={task.id}
+                      task={task}
+                      agents={agents}
+                      onStatusChange={handleStatusChange}
+                      onUpdate={onUpdateTask}
+                      onDelete={onDeleteTask}
+                      onAssignAgent={onAssignAgent}
+                      onViewDetail={handleViewDetail}
+                      autoAssignMode={autoAssignMode}
+                      taskChatMessages={taskChatMessages}
+                      onSendTaskMessage={onSendTaskMessage}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {cancelledTasks.length > 0 && (
+              <div className="mt-6">
+                <h3 className="text-sm font-semibold text-slate-300 uppercase mb-3 flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-slate-500"></span>
+                  취소됨 ({cancelledTasks.length})
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {cancelledTasks.map(task => (
+                    <TaskCard
+                      key={task.id}
+                      task={task}
+                      agents={agents}
+                      onStatusChange={handleStatusChange}
+                      onUpdate={onUpdateTask}
+                      onDelete={onDeleteTask}
+                      onAssignAgent={onAssignAgent}
+                      onViewDetail={handleViewDetail}
+                      autoAssignMode={autoAssignMode}
+                      taskChatMessages={taskChatMessages}
+                      onSendTaskMessage={onSendTaskMessage}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {failedTasksList.length > 0 && (
+              <div className="mt-6">
+                <h3 className="text-sm font-semibold text-slate-300 uppercase mb-3 flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-red-500"></span>
+                  실패 ({failedTasksList.length})
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {failedTasksList.map(task => (
                     <TaskCard
                       key={task.id}
                       task={task}

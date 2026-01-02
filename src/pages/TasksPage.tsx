@@ -16,10 +16,22 @@ interface OutletContext {
 
 export function TasksPage() {
   const allAgents = useAllAgents();
-  const { tasks, autoAssignMode, setAutoAssignMode, interactions, taskChatMessages, agentLogs, updateTask, deleteTask } = useTaskStore();
+  const {
+    tasks,
+    autoAssignMode,
+    setAutoAssignMode,
+    interactions,
+    taskChatMessages,
+    agentLogs,
+    updateTask,
+    deleteTask,
+    clearAllTasks,
+    deleteCompletedTasks,
+    clearAllLogs
+  } = useTaskStore();
   const { tickets, approvalQueue } = useTicketStore();
   const { settings } = useSettingsStore();
-  
+
   const { handleAssignAgent, handleRespondInteraction, handleSendTaskMessage } = useOutletContext<OutletContext>();
 
   return (
@@ -35,6 +47,9 @@ export function TasksPage() {
         onCreateTask={() => {}} // Will be implemented
         onUpdateTask={updateTask}
         onDeleteTask={deleteTask}
+        onClearAllTasks={clearAllTasks}
+        onDeleteCompletedTasks={deleteCompletedTasks}
+        onClearAllLogs={clearAllLogs}
         onAssignAgent={handleAssignAgent}
         onRespondInteraction={handleRespondInteraction}
         onSendTaskMessage={handleSendTaskMessage}

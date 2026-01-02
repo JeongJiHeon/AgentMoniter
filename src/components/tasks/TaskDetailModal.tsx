@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import type { Task } from '../../types/task';
 import type { Agent, Ticket, ApprovalRequest, AgentLog, Interaction, TaskChatMessage } from '../../types';
 import { AgentActivityLog } from './AgentActivityLog';
 import { AgentInteractionPanel } from './AgentInteractionPanel';
 import { OrchestrationView } from './OrchestrationView';
 import { TaskChatDrawer } from './TaskChatDrawer';
+import { useWebSocketStore } from '../../stores';
 
 interface TaskDetailModalProps {
   isOpen: boolean;
@@ -37,11 +38,27 @@ export function TaskDetailModal({
 }: TaskDetailModalProps) {
   const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'agent_activity' | 'interaction' | 'approvals'>('overview');
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const requestedTaskIdRef = useRef<string | null>(null);
+  const { requestTaskEvents } = useWebSocketStore();
 
   // Get sub agents if orchestrator
   const subAgents = agent?.role === 'orchestration' && agent.subAgents
     ? agent.subAgents.map(id => allAgents.find(a => a.id === id)).filter(Boolean) as Agent[]
     : [];
+
+  // Request task events when modal opens or task changes
+  useEffect(() => {
+    if (isOpen && task?.id && requestedTaskIdRef.current !== task.id) {
+      console.log('[TaskDetailModal] Requesting events for task:', task.id);
+      requestTaskEvents(task.id);
+      requestedTaskIdRef.current = task.id;
+    }
+
+    // Reset when modal closes
+    if (!isOpen) {
+      requestedTaskIdRef.current = null;
+    }
+  }, [isOpen, task?.id, requestTaskEvents]);
 
   useEffect(() => {
     // ESC 키로 모달 닫기
@@ -72,11 +89,12 @@ export function TaskDetailModal({
     urgent: 'text-red-400',
   };
 
-  const statusColors = {
+  const statusColors: Record<string, string> = {
     pending: 'text-slate-400',
     in_progress: 'text-blue-400',
     completed: 'text-green-400',
-    cancelled: 'text-red-400',
+    cancelled: 'text-slate-500',
+    failed: 'text-red-400',
   };
 
   return (
@@ -88,11 +106,12 @@ export function TaskDetailModal({
             <div className="flex-1">
               <h2 className="text-2xl font-semibold text-white mb-2">{task.title}</h2>
               <div className="flex items-center gap-3 flex-wrap">
-                <span className={`text-sm font-medium ${statusColors[task.status]}`}>
+                <span className={`text-sm font-medium ${statusColors[task.status] || 'text-slate-400'}`}>
                   {task.status === 'pending' && '⏳ 대기 중'}
                   {task.status === 'in_progress' && '🔄 진행 중'}
                   {task.status === 'completed' && '✅ 완료'}
-                  {task.status === 'cancelled' && '❌ 취소됨'}
+                  {task.status === 'cancelled' && '⛔ 취소됨'}
+                  {task.status === 'failed' && '❌ 실패'}
                 </span>
                 <span className={`text-sm font-medium ${priorityColors[task.priority]}`}>
                   {task.priority === 'urgent' && '🔥 긴급'}

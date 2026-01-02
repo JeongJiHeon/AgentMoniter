@@ -5,6 +5,7 @@ from fastapi import APIRouter, Request, HTTPException, Header
 from fastapi.responses import JSONResponse
 from typing import Optional
 import json
+from datetime import datetime
 from services.slack_webhook import SlackWebhookService
 
 router = APIRouter(prefix="/api/slack", tags=["slack"])
@@ -32,9 +33,12 @@ async def slack_webhook(
     
     # 모든 요청 로그 출력 (디버깅)
     print(f"\n{'='*60}")
-    print(f"[SlackWebhook] New request received")
+    print(f"[SlackWebhook] New request received at {datetime.now().isoformat()}")
+    print(f"[SlackWebhook] Method: {request.method}")
+    print(f"[SlackWebhook] URL: {request.url}")
     print(f"[SlackWebhook] Headers: {dict(request.headers)}")
-    print(f"[SlackWebhook] Body: {body_str[:500]}")  # 처음 500자만 출력
+    print(f"[SlackWebhook] Body length: {len(body_str)}")
+    print(f"[SlackWebhook] Body: {body_str[:1000]}")  # 처음 1000자 출력
     print(f"{'='*60}\n")
     
     # 이벤트 파싱

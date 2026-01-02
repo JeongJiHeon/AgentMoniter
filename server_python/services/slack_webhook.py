@@ -93,10 +93,27 @@ class SlackWebhookService:
                 print(f"[SlackWebhookService] Message deleted event, skipping")
                 return None
             
-            # DM인지 확인 (channel_type이 'im'인 경우)
+            # 봇 메시지는 무시 (DM 처리 전에 확인)
+            if subtype == "bot_message":
+                print(f"[SlackWebhookService] Bot message, skipping")
+                return None
+            
+            # DM인지 확인
+            # 방법 1: channel_type이 'im'인 경우
             channel_type = event.get("channel_type")
+            # 방법 2: 채널 ID가 'D'로 시작하는 경우 (DM 채널 ID 형식)
+            channel = event.get("channel", "")
+            is_dm = False
+            
             if channel_type == "im":
                 print(f"[SlackWebhookService] Detected DM (channel_type=im)")
+                is_dm = True
+            elif channel and channel.startswith("D"):
+                print(f"[SlackWebhookService] Detected DM (channel ID starts with D: {channel})")
+                is_dm = True
+            
+            if is_dm:
+                print(f"[SlackWebhookService] Processing DM event")
                 return self._handle_dm(event)
             
             # 멘션이 포함된 경우

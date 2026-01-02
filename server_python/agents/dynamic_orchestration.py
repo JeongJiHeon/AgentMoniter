@@ -31,6 +31,22 @@ from .agent_result import (
     failed,
     running
 )
+from .planner_agent import planner_agent, PlannerContext, PlannerResult
+from .conversation_state import ConversationStateV3
+from .task_schema import (
+    TaskSchema,
+    TaskSchemaRegistry,
+    NextAction,
+    NextActionType,
+    create_initial_state_v3
+)
+from .extractors import extract_and_update_state
+from .task_state import (
+    TaskStateManager,
+    TaskStatus,
+    AgentExecutionStatus,
+    task_state_manager
+)
 
 
 # =============================================================================
@@ -50,6 +66,7 @@ class WorkflowPhase(str, Enum):
     EXECUTING = "executing"            # Agent 실행 중
     WAITING_USER = "waiting_user"      # 사용자 입력 대기
     COMPLETING = "completing"          # 완료 처리 중
+    FINALIZING = "finalizing"          # 최종 정리 중 (Orchestrator Final Narration)
     COMPLETED = "completed"            # 완료
     FAILED = "failed"                  # 실패
 
@@ -76,7 +93,7 @@ class AgentStep:
     completed_at: Optional[datetime] = None
 
 
-@dataclass 
+@dataclass
 class DynamicWorkflow:
     """동적 워크플로우 상태"""
     task_id: str
@@ -85,6 +102,9 @@ class DynamicWorkflow:
     steps: List[AgentStep] = field(default_factory=list)
     current_step_index: int = 0
     context: Dict[str, Any] = field(default_factory=dict)  # Agent 간 공유 데이터
+    # Schema 기반 상태 관리
+    conversation_state: Optional[ConversationStateV3] = None  # 도메인 중립적 상태
+    task_schema: Optional[TaskSchema] = None  # 업무별 로직 정의
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     
@@ -139,7 +159,8 @@ class DynamicOrchestrationEngine:
         self._locks: Dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
         self.ws_server: Any = None
-        
+        self.task_state_manager = task_state_manager
+
         # 시스템 Agent 정의
         self.system_agents = {
             "orchestrator": {
@@ -147,16 +168,46 @@ class DynamicOrchestrationEngine:
                 "name": "Orchestration Agent",
                 "role": AgentRole.ORCHESTRATOR
             },
+            "planner": {
+                "id": "planner-agent",
+                "name": "Planner Agent",
+                "role": AgentRole.ORCHESTRATOR
+            },
             "q_and_a": {
-                "id": "qa-agent-system", 
+                "id": "qa-agent-system",
                 "name": "Q&A Agent",
                 "role": AgentRole.Q_AND_A
             }
         }
-    
+
+        # 시스템 Agent 등록
+        for agent_key, agent_info in self.system_agents.items():
+            self.task_state_manager.register_agent(
+                agent_id=agent_info["id"],
+                agent_name=agent_info["name"]
+            )
+
     def set_ws_server(self, ws_server: Any) -> None:
-        """WebSocket 서버 설정"""
+        """WebSocket 서버 설정 및 이벤트 핸들러 연결"""
         self.ws_server = ws_server
+
+        # TaskStateManager 이벤트 핸들러 설정
+        def on_task_status_change(event: Dict[str, Any]) -> None:
+            if self.ws_server:
+                self.ws_server.broadcast_task_status_change(event)
+                # Task 상태 요약도 함께 전송
+                summary = self.task_state_manager.get_task_summary()
+                self.ws_server.broadcast_task_summary(summary)
+
+        def on_agent_status_change(agent_status: Dict[str, Any]) -> None:
+            if self.ws_server:
+                self.ws_server.broadcast_agent_status_change(agent_status)
+                # Agent 상태 요약도 함께 전송
+                summary = self.task_state_manager.get_agent_summary()
+                self.ws_server.broadcast_agent_summary(summary)
+
+        self.task_state_manager.set_status_change_handler(on_task_status_change)
+        self.task_state_manager.set_agent_change_handler(on_agent_status_change)
     
     async def _get_lock(self, task_id: str) -> asyncio.Lock:
         """task_id별 Lock 획득"""
@@ -186,10 +237,16 @@ class DynamicOrchestrationEngine:
         """
         lock = await self._get_lock(task_id)
         async with lock:
+            # Schema 기반 상태 관리 초기화
+            conversation_state = create_initial_state_v3(request)
+            task_schema = TaskSchemaRegistry.infer_from_request(request)
+
             # 워크플로우 생성
             workflow = DynamicWorkflow(
                 task_id=task_id,
                 original_request=request,
+                conversation_state=conversation_state,
+                task_schema=task_schema,
                 context={
                     "available_agents": available_agents,
                     "slack_channel": slack_channel,
@@ -197,10 +254,16 @@ class DynamicOrchestrationEngine:
                 }
             )
             self._workflows[task_id] = workflow
-        
+
+        # TaskStateManager: Task 실행 시작
+        self.task_state_manager.start_execution(task_id=task_id, total_steps=0)
+
         self._log("orchestrator-system", "Orchestration Agent", "info",
                   f"🎯 새로운 요청 수신: {request[:50]}...", task_id=task_id)
-        
+        self._log("orchestrator-system", "Orchestration Agent", "info",
+                  f"📋 TaskSchema: {task_schema.task_type}, required_facts={task_schema.required_facts}",
+                  task_id=task_id)
+
         # 1. 요청 분석 및 초기 Plan 생성
         initial_plan = await self._analyze_and_plan(workflow, available_agents)
         
@@ -243,21 +306,50 @@ class DynamicOrchestrationEngine:
         
         # 사용자 입력 저장 (Agent 실행 시 context로 전달)
         current_step.user_input = user_input
-        
-        self._log(current_step.agent_id, current_step.agent_name, "info",
-                  f"📥 사용자 응답 수신: {user_input[:50]}...", task_id=task_id)
-        
+
+        # Schema 기반 상태 업데이트 (Fact/Decision 분리 추출)
+        if workflow.conversation_state:
+            workflow.conversation_state = await extract_and_update_state(
+                user_input,
+                workflow.conversation_state,
+                call_llm_func=call_llm
+            )
+            self._log(current_step.agent_id, current_step.agent_name, "info",
+                      f"📥 사용자 응답 수신: {user_input[:50]}...",
+                      details=f"facts: {workflow.conversation_state.facts}, decisions: {workflow.conversation_state.decisions}",
+                      task_id=task_id)
+
         workflow.phase = WorkflowPhase.EXECUTING
-        
+
+        # TaskStateManager: Task 상태를 RUNNING으로, Agent를 RUNNING으로 전환
+        self.task_state_manager.update_execution(task_id=task_id, status=TaskStatus.RUNNING)
+        execution = self.task_state_manager.get_execution(task_id)
+        if execution:
+            self.task_state_manager.set_agent_running(
+                agent_id=current_step.agent_id,
+                agent_name=current_step.agent_name,
+                task_id=task_id,
+                execution_id=execution.execution_id,
+                step_description=current_step.description
+            )
+
         # Agent 실행 (user_input 제공)
         result = await self._execute_agent_step(task_id, current_step, user_input=user_input)
-        
+
         # AgentResult.status로만 분기
         if result.status == AgentLifecycleStatus.WAITING_USER:
             # Agent가 또 다른 질문 요청 (multi-turn 대화)
             current_step.status = "waiting_user"
             workflow.phase = WorkflowPhase.WAITING_USER
-            
+
+            # TaskStateManager: Task를 WAITING_USER로, Agent를 WAITING으로
+            self.task_state_manager.set_waiting_user(task_id)
+            self.task_state_manager.update_agent_status(
+                agent_id=current_step.agent_id,
+                status=AgentExecutionStatus.WAITING,
+                current_step="사용자 입력 대기 중"
+            )
+
             # WebSocket으로 질문 전송
             if self.ws_server and result.message:
                 self.ws_server.broadcast_task_interaction(
@@ -267,30 +359,40 @@ class DynamicOrchestrationEngine:
                     agent_id=current_step.agent_id,
                     agent_name=current_step.agent_name
                 )
-            
+
             self._log(current_step.agent_id, current_step.agent_name, "info",
                       f"❓ 추가 질문: {result.message[:100] if result.message else ''}...",
                       task_id=task_id)
-            
+
             return None  # advance 금지
-        
+
         elif result.status == AgentLifecycleStatus.COMPLETED:
             # Agent가 완료 선언
             current_step.status = "completed"
             current_step.result = result.final_data.get("output", result.message) if result.final_data else result.message
             current_step.completed_at = datetime.now()
-            
+
+            # TaskStateManager: completed_steps 증가, Agent를 IDLE로
+            execution = self.task_state_manager.get_execution(task_id)
+            if execution:
+                self.task_state_manager.update_execution(
+                    task_id=task_id,
+                    completed_steps=execution.completed_steps + 1,
+                    status=TaskStatus.RUNNING
+                )
+            self.task_state_manager.set_agent_idle(current_step.agent_id)
+
             # 결과를 context에 저장
             if result.final_data:
                 workflow.context[f"step_{current_step.order}_result"] = result.final_data
             else:
                 workflow.context[f"step_{current_step.order}_result"] = result.message
-            
+
             self._log(current_step.agent_id, current_step.agent_name, "info",
                       f"✅ 작업 완료",
                       details=(result.message[:100] + "..." if result.message and len(result.message) > 100 else result.message) if result.message else "",
                       task_id=task_id)
-            
+
             # Q&A Agent의 최종 응답은 사용자에게 표시
             if current_step.agent_role == AgentRole.Q_AND_A and self.ws_server and result.message:
                 self.ws_server.broadcast_task_interaction(
@@ -300,7 +402,7 @@ class DynamicOrchestrationEngine:
                     agent_id=current_step.agent_id,
                     agent_name=current_step.agent_name
                 )
-            
+
             # 다음 단계로 진행
             return await self._orchestrate_next(task_id)
         
@@ -308,29 +410,38 @@ class DynamicOrchestrationEngine:
             # Agent가 실패 선언
             current_step.status = "failed"
             workflow.phase = WorkflowPhase.FAILED
-            
+
+            # TaskStateManager: Agent를 IDLE로, Task를 FAILED로
+            self.task_state_manager.set_agent_idle(current_step.agent_id)
+            self.task_state_manager.complete_execution(task_id, success=False)
+
             error_message = result.message or result.error.get("message", "작업 처리 중 오류가 발생했습니다.") if result.error else "작업 처리 중 오류가 발생했습니다."
-            
+
             self._log(current_step.agent_id, current_step.agent_name, "error",
                       f"❌ 작업 실패: {error_message}",
                       task_id=task_id)
-            
+
             return error_message
-        
+
         elif result.status == AgentLifecycleStatus.RUNNING:
             # Agent가 계속 실행 중
             current_step.status = "running"
             return None
-        
+
         else:
             # 알 수 없는 상태
             current_step.status = "failed"
             workflow.phase = WorkflowPhase.FAILED
+
+            # TaskStateManager: Agent를 IDLE로, Task를 FAILED로
+            self.task_state_manager.set_agent_idle(current_step.agent_id)
+            self.task_state_manager.complete_execution(task_id, success=False)
+
             self._log(current_step.agent_id, current_step.agent_name, "error",
                       f"❌ 알 수 없는 Agent 상태: {result.status}",
                       task_id=task_id)
             return "알 수 없는 오류가 발생했습니다."
-    
+
     # =========================================================================
     # Orchestration Logic
     # =========================================================================
@@ -338,159 +449,217 @@ class DynamicOrchestrationEngine:
     async def _analyze_and_plan(
         self,
         workflow: DynamicWorkflow,
-        available_agents: List[Dict[str, Any]]
+        available_agents: List[Dict[str, Any]],
+        reason: str = "initial"
     ) -> Optional[List[Dict[str, Any]]]:
         """
-        요청 분석 및 초기 Plan 생성
+        요청 분석 및 Plan 생성 (PlannerAgent 사용)
+
+        이제 PlannerAgent를 호출하여 계획을 수립합니다.
         """
         workflow.phase = WorkflowPhase.ANALYZING
-        
-        # Agent가 없으면 기본 Agent 추가
-        if not available_agents:
-            available_agents = [
-                {"id": "general-agent", "name": "General Agent", "type": "custom"},
-            ]
-        
-        agent_descriptions = "\n".join([
-            f"- {a['name']} (ID: {a['id']}): {a.get('type', 'custom')}"
-            for a in available_agents
-        ])
-        
-        messages = [
-            {
-                "role": "system",
-                "content": """당신은 멀티-에이전트 시스템의 Orchestration Agent입니다.
-사용자 요청을 분석하여 어떤 Agent들이 어떤 순서로 작업해야 하는지 계획을 세워주세요.
 
-중요 규칙:
-1. Worker Agent들은 사용자와 직접 소통하지 않습니다. 작업만 수행합니다.
-2. 사용자와 소통이 필요할 때는 Q&A Agent를 사용하세요.
-3. 예: "메뉴 추천" 후 → Q&A Agent가 "어떤 메뉴로 할까요?" 질문
-4. 예: "예약 진행" 후 → Q&A Agent가 "이대로 예약할까요?" 확인
-5. 모든 작업 완료 후 마지막에 Q&A Agent가 최종 응답을 정리합니다"""
-            },
-            {
-                "role": "user",
-                "content": f"""사용자 요청: {workflow.original_request}
+        self._log("planner-agent", "Planner Agent", "info",
+                  f"🎯 Planning 시작 - Reason: {reason}",
+                  task_id=workflow.task_id)
 
-사용 가능한 Agent 목록:
-{agent_descriptions}
+        # PlannerAgent 호출
+        planner_context = PlannerContext(
+            task_id=workflow.task_id,
+            user_request=workflow.original_request,
+            available_agents=available_agents,
+            reason=reason
+        )
 
-다음 JSON 형식으로 실행 계획을 작성해주세요:
-```json
-{{
-  "analysis": "요청 분석 내용",
-  "steps": [
-    {{
-      "agent_id": "agent-id",
-      "agent_name": "Agent 이름",
-      "role": "worker",
-      "description": "이 Agent가 수행할 작업",
-      "needs_user_confirmation": false
-    }},
-    {{
-      "agent_id": "qa-agent-system",
-      "agent_name": "Q&A Agent",
-      "role": "q_and_a",
-      "description": "사용자에게 질문 또는 최종 응답 생성",
-      "user_prompt": "질문이 필요한 경우에만 작성 (선택사항)"
-    }}
-  ]
-}}
-```"""
-            }
-        ]
-        
-        print(f"[DynamicOrchestration] Calling LLM for planning...")
-        response = await call_llm(messages, max_tokens=8000, json_mode=True)
-        print(f"[DynamicOrchestration] LLM Response: {response[:500] if response else 'EMPTY'}...")
-        
-        try:
-            plan = json.loads(response)
-            steps = plan.get("steps", [])
-            print(f"[DynamicOrchestration] Parsed {len(steps)} steps from plan")
-            
-            self._log("orchestrator-system", "Orchestration Agent", "decision",
-                      f"📋 실행 계획 수립: {len(steps)}개 단계",
-                      details=plan.get("analysis", ""),
+        planner_result = await planner_agent.run(planner_context)
+
+        if not planner_result.success:
+            self._log("planner-agent", "Planner Agent", "error",
+                      "❌ Planning 실패",
                       task_id=workflow.task_id)
-            
-            # 스텝 생성
-            for i, step_data in enumerate(steps):
-                # role 매핑 (호환성: question/answer -> q_and_a)
-                role_str = step_data.get("role", "worker")
-                if role_str in ["question", "answer"]:
-                    role_str = "q_and_a"
-                
-                step = AgentStep(
-                    id=str(uuid4()),
-                    agent_id=step_data.get("agent_id", f"agent-{i}"),
-                    agent_name=step_data.get("agent_name", f"Agent {i+1}"),
-                    agent_role=AgentRole(role_str),
-                    description=step_data.get("description", ""),
-                    order=i + 1,
-                    user_prompt=step_data.get("user_prompt")
-                )
-                workflow.add_step(step)
-            
-            return steps
-            
-        except json.JSONDecodeError as e:
-            print(f"[DynamicOrchestration] JSON parse error: {e}")
-            print(f"[DynamicOrchestration] Failed to parse plan: {response[:500] if response else 'EMPTY'}")
-            
-            # JSON 코드 블록에서 추출 시도
-            try:
-                import re
-                json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response)
-                if json_match:
-                    json_text = json_match.group(1).strip()
-                    plan = json.loads(json_text)
-                    steps = plan.get("steps", [])
-                    print(f"[DynamicOrchestration] Extracted {len(steps)} steps from code block")
-                    
-                    for i, step_data in enumerate(steps):
-                        # role 매핑 (호환성: question/answer -> q_and_a)
-                        role_str = step_data.get("role", "worker")
-                        if role_str in ["question", "answer"]:
-                            role_str = "q_and_a"
-                        
-                        step = AgentStep(
-                            id=str(uuid4()),
-                            agent_id=step_data.get("agent_id", f"agent-{i}"),
-                            agent_name=step_data.get("agent_name", f"Agent {i+1}"),
-                            agent_role=AgentRole(role_str),
-                            description=step_data.get("description", ""),
-                            order=i + 1,
-                            user_prompt=step_data.get("user_prompt")
-                        )
-                        workflow.add_step(step)
-                    
-                    return steps
-            except Exception as e2:
-                print(f"[DynamicOrchestration] Code block extraction also failed: {e2}")
-            
             return None
+
+        steps = planner_result.steps
+        print(f"[DynamicOrchestration] PlannerAgent returned {len(steps)} steps")
+
+        self._log("planner-agent", "Planner Agent", "decision",
+                  f"📋 실행 계획 수립: {len(steps)}개 단계 (신뢰도: {planner_result.confidence:.2f})",
+                  details=planner_result.analysis,
+                  task_id=workflow.task_id)
+
+        # 스텝 생성
+        for i, step_data in enumerate(steps):
+            # role 매핑 (호환성: question/answer -> q_and_a)
+            role_str = step_data.get("role", "worker")
+            if role_str in ["question", "answer"]:
+                role_str = "q_and_a"
+
+            step = AgentStep(
+                id=str(uuid4()),
+                agent_id=step_data.get("agent_id", f"agent-{i}"),
+                agent_name=step_data.get("agent_name", f"Agent {i+1}"),
+                agent_role=AgentRole(role_str),
+                description=step_data.get("description", ""),
+                order=i + 1,
+                user_prompt=step_data.get("user_prompt")
+            )
+            workflow.add_step(step)
+
+        # 재계획 필요성 저장 (나중에 사용)
+        workflow.context["planner_confidence"] = planner_result.confidence
+        workflow.context["planner_result"] = planner_result
+
+        # TaskStateManager: total_steps 업데이트
+        execution = self.task_state_manager.get_execution(workflow.task_id)
+        if execution:
+            execution.total_steps = len(steps)
+
+        return steps
     
+    async def _check_replan_needed(
+        self,
+        task_id: str,
+        current_result: AgentResult
+    ) -> Optional[str]:
+        """
+        재계획 필요성 확인
+
+        Re-planning 트리거:
+        1. Agent 실패
+        2. 낮은 신뢰도 (confidence < 0.6)
+        3. 사용자 입력 방향 변경 (향후 구현)
+
+        Returns:
+            재계획 사유 (재계획 필요 시) 또는 None
+        """
+        workflow = self._workflows.get(task_id)
+        if not workflow:
+            return None
+
+        # 1. Agent 실패
+        if current_result.status == AgentLifecycleStatus.FAILED:
+            return "agent_failure"
+
+        # 2. 낮은 신뢰도
+        if current_result.partial_data and isinstance(current_result.partial_data, dict):
+            confidence = current_result.partial_data.get("confidence", 1.0)
+            if confidence < 0.6:
+                return f"low_confidence_{confidence:.2f}"
+
+        # 3. 사용자 입력 방향 변경 (향후 구현)
+        # TODO: 사용자 입력이 기존 계획과 상충되는지 확인
+
+        return None
+
+    async def _replan_workflow(
+        self,
+        task_id: str,
+        reason: str
+    ) -> bool:
+        """
+        워크플로우 재계획
+
+        Returns:
+            성공 여부
+        """
+        workflow = self._workflows.get(task_id)
+        if not workflow:
+            return False
+
+        self._log("planner-agent", "Planner Agent", "warning",
+                  f"⚠️ 재계획 트리거 - Reason: {reason}",
+                  task_id=task_id)
+
+        # 기존 계획 및 실행 결과 수집
+        previous_plan = [
+            {
+                "agent_id": step.agent_id,
+                "agent_name": step.agent_name,
+                "description": step.description,
+                "status": step.status
+            }
+            for step in workflow.steps
+        ]
+
+        execution_results = []
+        for step in workflow.steps:
+            if step.status in ["completed", "failed"]:
+                # AgentResult 재구성 (저장된 데이터에서)
+                result_data = workflow.context.get(f"step_{step.order}_result")
+                if result_data:
+                    execution_results.append(
+                        AgentResult(
+                            status=AgentLifecycleStatus.COMPLETED if step.status == "completed" else AgentLifecycleStatus.FAILED,
+                            message=step.result if isinstance(step.result, str) else str(step.result),
+                            final_data=result_data if isinstance(result_data, dict) else {"output": str(result_data)}
+                        )
+                    )
+
+        # PlannerAgent 재호출
+        planner_context = PlannerContext(
+            task_id=task_id,
+            user_request=workflow.original_request,
+            available_agents=workflow.context.get("available_agents", []),
+            previous_plan=previous_plan,
+            execution_results=execution_results,
+            reason=f"replan: {reason}"
+        )
+
+        planner_result = await planner_agent.run(planner_context)
+
+        if not planner_result.success:
+            self._log("planner-agent", "Planner Agent", "error",
+                      "❌ 재계획 실패",
+                      task_id=task_id)
+            return False
+
+        # 기존 워크플로우 초기화
+        workflow.steps.clear()
+        workflow.current_step_index = 0
+
+        # 새로운 스텝 생성
+        for i, step_data in enumerate(planner_result.steps):
+            role_str = step_data.get("role", "worker")
+            if role_str in ["question", "answer"]:
+                role_str = "q_and_a"
+
+            step = AgentStep(
+                id=str(uuid4()),
+                agent_id=step_data.get("agent_id", f"agent-{i}"),
+                agent_name=step_data.get("agent_name", f"Agent {i+1}"),
+                agent_role=AgentRole(role_str),
+                description=step_data.get("description", ""),
+                order=i + 1,
+                user_prompt=step_data.get("user_prompt")
+            )
+            workflow.add_step(step)
+
+        self._log("planner-agent", "Planner Agent", "decision",
+                  f"🔄 재계획 완료: {len(workflow.steps)}개 단계",
+                  details=planner_result.analysis,
+                  task_id=task_id)
+
+        return True
+
     async def _orchestrate_next(self, task_id: str) -> Optional[str]:
         """
         Orchestration이 다음 단계 결정
-        
+
         현재 결과를 보고 계획대로 진행하거나 수정
         """
         workflow = self._workflows.get(task_id)
         if not workflow:
             return None
-        
+
         # 다음 스텝으로 진행
         if not workflow.advance():
             # 모든 스텝 완료
             return await self._generate_final_answer(task_id)
-        
+
         self._log("orchestrator-system", "Orchestration Agent", "info",
                   f"🔄 다음 단계로 진행: Step {workflow.current_step_index + 1}",
                   task_id=task_id)
-        
+
         return await self._execute_workflow(task_id)
     
     # =========================================================================
@@ -538,12 +707,29 @@ class DynamicOrchestrationEngine:
             # 스텝 실행
             current_step.status = "running"
             current_step.started_at = datetime.now()
-            
+
+            # TaskStateManager: Agent 실행 상태로 설정
+            execution = self.task_state_manager.get_execution(task_id)
+            if execution:
+                self.task_state_manager.set_agent_running(
+                    agent_id=current_step.agent_id,
+                    agent_name=current_step.agent_name,
+                    task_id=task_id,
+                    execution_id=execution.execution_id,
+                    step_description=current_step.description
+                )
+                self.task_state_manager.update_execution(
+                    task_id=task_id,
+                    active_agent_id=current_step.agent_id,
+                    active_agent_name=current_step.agent_name,
+                    current_step=current_step.description
+                )
+
             self._log(current_step.agent_id, current_step.agent_name, "info",
                       f"🔧 작업 시작: {current_step.description}",
                       details=f"Step {current_step.order}/{len(workflow.steps)}",
                       task_id=task_id)
-            
+
             # 통일된 Agent 실행 (Worker/Q&A 구분 없음)
             result = await self._execute_agent_step(task_id, current_step)
             
@@ -553,7 +739,15 @@ class DynamicOrchestrationEngine:
                 current_step.status = "waiting_user"
                 current_step.user_input = None  # 아직 입력 없음
                 workflow.phase = WorkflowPhase.WAITING_USER
-                
+
+                # TaskStateManager: Task를 WAITING_USER로, Agent를 WAITING으로 설정
+                self.task_state_manager.set_waiting_user(task_id)
+                self.task_state_manager.update_agent_status(
+                    agent_id=current_step.agent_id,
+                    status=AgentExecutionStatus.WAITING,
+                    current_step="사용자 입력 대기 중"
+                )
+
                 # WebSocket으로 메시지 전송 (사용자에게 표시)
                 if self.ws_server and result.message:
                     self.ws_server.broadcast_task_interaction(
@@ -563,12 +757,12 @@ class DynamicOrchestrationEngine:
                         agent_id=current_step.agent_id,
                         agent_name=current_step.agent_name
                     )
-                
+
                 self._log(current_step.agent_id, current_step.agent_name, "info",
                           f"❓ 사용자 입력 대기",
                           details=result.message[:200] if result.message else "",
                           task_id=task_id)
-                
+
                 return None  # advance 금지
             
             elif result.status == AgentLifecycleStatus.COMPLETED:
@@ -576,25 +770,43 @@ class DynamicOrchestrationEngine:
                 current_step.status = "completed"
                 current_step.result = result.final_data.get("output", result.message) if result.final_data else result.message
                 current_step.completed_at = datetime.now()
-                
+
+                # TaskStateManager: completed_steps 증가, Agent를 IDLE로
+                execution = self.task_state_manager.get_execution(task_id)
+                if execution:
+                    self.task_state_manager.update_execution(
+                        task_id=task_id,
+                        completed_steps=execution.completed_steps + 1,
+                        status=TaskStatus.RUNNING
+                    )
+                self.task_state_manager.set_agent_idle(current_step.agent_id)
+
                 # 결과를 context에 저장
                 if result.final_data:
                     workflow.context[f"step_{current_step.order}_result"] = result.final_data
                 else:
                     workflow.context[f"step_{current_step.order}_result"] = result.message
-                
+
                 self._log(current_step.agent_id, current_step.agent_name, "info",
                           f"✅ 작업 완료",
                           details=(result.message[:100] + "..." if result.message and len(result.message) > 100 else result.message) if result.message else "",
                           task_id=task_id)
-                
+
                 # Worker Agent 결과는 사용자에게 직접 표시하지 않음
                 # Q&A Agent가 context로 사용하여 사용자와 소통함
                 if current_step.agent_role != AgentRole.Q_AND_A:
                     print(f"[DynamicOrchestration] Worker Agent 결과 저장 (사용자에게 표시 안 함): {current_step.agent_name}")
                 else:
-                    # Q&A Agent의 최종 응답은 사용자에게 표시
-                    if self.ws_server and result.message:
+                    # Q&A Agent의 Gate 종료는 Chat에 표시하지 않음
+                    is_gate_completion = (
+                        result.final_data
+                        and result.final_data.get("reason") == "required_slots_filled"
+                    )
+
+                    if is_gate_completion:
+                        print(f"[DynamicOrchestration] Q&A Agent Gate 종료 (Chat 출력 없음)")
+                    elif self.ws_server and result.message:
+                        # Q&A Agent의 일반 응답만 사용자에게 표시
                         self.ws_server.broadcast_task_interaction(
                             task_id=task_id,
                             role='agent',
@@ -602,23 +814,67 @@ class DynamicOrchestrationEngine:
                             agent_id=current_step.agent_id,
                             agent_name=current_step.agent_name
                         )
-                
+
+                # 재계획 필요성 체크 (낮은 신뢰도 등)
+                replan_reason = await self._check_replan_needed(task_id, result)
+                if replan_reason:
+                    self._log("planner-agent", "Planner Agent", "warning",
+                              f"⚠️ 재계획 필요 감지: {replan_reason}",
+                              task_id=task_id)
+
+                    # 재계획 시도
+                    replan_success = await self._replan_workflow(task_id, replan_reason)
+                    if replan_success:
+                        # 재계획 성공 - 처음부터 다시 실행
+                        self._log("planner-agent", "Planner Agent", "info",
+                                  "🔄 재계획 성공 - 워크플로우 재시작",
+                                  task_id=task_id)
+                        return await self._execute_workflow(task_id)
+                    else:
+                        # 재계획 실패 - 기존 계획대로 진행
+                        self._log("planner-agent", "Planner Agent", "warning",
+                                  "⚠️ 재계획 실패 - 기존 계획 유지",
+                                  task_id=task_id)
+
                 # Orchestration이 다음 단계 결정
                 return await self._orchestrate_next(task_id)
             
             elif result.status == AgentLifecycleStatus.FAILED:
                 # Agent가 실패 선언
                 current_step.status = "failed"
-                workflow.phase = WorkflowPhase.FAILED
-                
+
+                # TaskStateManager: Agent를 IDLE로
+                self.task_state_manager.set_agent_idle(current_step.agent_id)
+
                 error_message = result.message or result.error.get("message", "작업 처리 중 오류가 발생했습니다.") if result.error else "작업 처리 중 오류가 발생했습니다."
-                
+
                 self._log(current_step.agent_id, current_step.agent_name, "error",
                           f"❌ 작업 실패: {error_message}",
                           task_id=task_id)
-                
-                return error_message
-            
+
+                # 실패 시 자동 재계획 시도
+                replan_reason = f"agent_failure: {current_step.agent_name}"
+                self._log("planner-agent", "Planner Agent", "warning",
+                          f"⚠️ 실패 감지 - 재계획 시도: {replan_reason}",
+                          task_id=task_id)
+
+                replan_success = await self._replan_workflow(task_id, replan_reason)
+                if replan_success:
+                    # 재계획 성공 - 워크플로우 재시작
+                    self._log("planner-agent", "Planner Agent", "info",
+                              "🔄 재계획 성공 - 워크플로우 재시작",
+                              task_id=task_id)
+                    return await self._execute_workflow(task_id)
+                else:
+                    # 재계획 실패 - 워크플로우 중단
+                    workflow.phase = WorkflowPhase.FAILED
+                    # TaskStateManager: Task를 FAILED로
+                    self.task_state_manager.complete_execution(task_id, success=False)
+                    self._log("planner-agent", "Planner Agent", "error",
+                              "❌ 재계획 실패 - 워크플로우 중단",
+                              task_id=task_id)
+                    return error_message
+
             elif result.status == AgentLifecycleStatus.RUNNING:
                 # Agent가 계속 실행 중 (비동기 작업 등)
                 current_step.status = "running"
@@ -629,6 +885,8 @@ class DynamicOrchestrationEngine:
                 # 알 수 없는 상태
                 current_step.status = "failed"
                 workflow.phase = WorkflowPhase.FAILED
+                # TaskStateManager: Task를 FAILED로
+                self.task_state_manager.complete_execution(task_id, success=False)
                 self._log(current_step.agent_id, current_step.agent_name, "error",
                           f"❌ 알 수 없는 Agent 상태: {result.status}",
                           task_id=task_id)
@@ -709,12 +967,12 @@ class DynamicOrchestrationEngine:
         Q&A Agent: 사용자와 소통 (질문 또는 답변)
         - 다른 Agent들의 결과를 context로 받아서 사용자와 소통
         - Worker Agent 결과는 사용자에게 직접 표시되지 않음
-        - LLM이 전체 context를 보고 WAITING_USER 또는 COMPLETED 상태 결정
+        - 필수 슬롯이 모두 채워지면 즉시 COMPLETED (Gate 역할)
         """
         workflow = self._workflows.get(task_id)
         if not workflow:
             return failed("워크플로우를 찾을 수 없습니다.")
-        
+
         # 모든 Worker Agent 결과 수집 (사용자에게 표시되지 않은 내부 context)
         worker_results = workflow.get_completed_results()
         
@@ -733,8 +991,8 @@ class DynamicOrchestrationEngine:
             if r.get('user_input'):
                 user_responses.append(f"[사용자 응답]\n{r['user_input']}")
         
-        worker_context = "\n\n---\n\n".join(worker_context_parts) if worker_context_parts else "아직 작업 결과가 없습니다."
-        user_context = "\n\n---\n\n".join(user_responses) if user_responses else "없음"
+        worker_context = "\n\n---\n\n".join(worker_context_parts) if worker_context_parts else "(아직 없음)"
+        user_context = "\n\n---\n\n".join(user_responses) if user_responses else "(없음)"
         
         # 현재 사용자 입력도 포함 (resume_with_user_input에서 전달된 경우)
         if user_input:
@@ -746,108 +1004,204 @@ class DynamicOrchestrationEngine:
             # step.user_prompt가 있고 사용자 입력이 없으면 초기 질문 반환
             if step.user_prompt and not user_input:
                 message = step.user_prompt
-                # Worker Agent 결과 요약 추가
-                if worker_results_data and worker_context.strip() != "아직 작업 결과가 없습니다.":
+                # Worker 결과가 있으면 자연스럽게 요약 추가
+                if worker_results_data and worker_context.strip() != "(아직 없음)":
                     latest_worker_result = worker_results_data[-1]
                     worker_result_text = latest_worker_result['result']
-                    worker_agent_name = latest_worker_result['agent_name']
-                    
-                    result_summary = worker_result_text[:500]
-                    if len(worker_result_text) > 500:
-                        result_summary += "..."
-                    
-                    if "점심" in worker_agent_name or "메뉴" in worker_agent_name:
-                        summary_header = "점심 메뉴 추천을 드렸습니다:\n\n"
-                    elif "식당" in worker_agent_name or "장소" in worker_agent_name:
-                        summary_header = "식당 추천을 드렸습니다:\n\n"
-                    else:
-                        summary_header = f"{worker_agent_name} 작업 결과:\n\n"
-                    
-                    message = f"{summary_header}{result_summary}\n\n{message}"
-                
+
+                    # Worker 결과 전체를 표시 (잘림 없음)
+                    # 자연스러운 메시지로 결과 전달 (Agent 이름 노출 최소화)
+                    message = f"{worker_result_text}\n\n{message}"
+
                 return waiting_user(
                     message=message,
                     partial_data={"agent_name": step.agent_name, "step_description": step.description}
                 )
-            
+
+            # =====================================================================
+            # Schema 기반 완료 체크 (Orchestrator가 판단)
+            # =====================================================================
+            if user_input and workflow.task_schema and workflow.conversation_state:
+                # Schema를 통해 다음 액션 결정
+                next_action = workflow.task_schema.get_next_action(workflow.conversation_state)
+
+                self._log(step.agent_id, step.agent_name, "info",
+                          f"📋 Schema 평가: next_action={next_action.action_type.value}",
+                          details=f"facts={workflow.conversation_state.facts}, decisions={workflow.conversation_state.decisions}",
+                          task_id=task_id)
+
+                # Schema가 COMPLETE 또는 EXECUTE를 반환하면 Q&A 종료
+                if next_action.action_type == NextActionType.COMPLETE:
+                    print(f"[DynamicOrchestration] Q&A Agent: Schema COMPLETE → COMPLETED")
+                    return completed(
+                        final_data={
+                            "conversation_state": workflow.conversation_state.to_dict(),
+                            "reason": "schema_complete",
+                            "agent_name": step.agent_name
+                        },
+                        message=""  # Chat 출력 없음 - Orchestrator가 최종 정리
+                    )
+
+                if next_action.action_type == NextActionType.EXECUTE:
+                    print(f"[DynamicOrchestration] Q&A Agent: Schema EXECUTE → COMPLETED (Worker 실행 필요)")
+                    # Worker 실행이 필요함을 알림
+                    workflow.conversation_state.set_flag("needs_worker_execution", True)
+                    if next_action.worker_id:
+                        workflow.context["next_worker_id"] = next_action.worker_id
+                    return completed(
+                        final_data={
+                            "conversation_state": workflow.conversation_state.to_dict(),
+                            "reason": "needs_worker_execution",
+                            "worker_id": next_action.worker_id,
+                            "agent_name": step.agent_name
+                        },
+                        message=""  # Chat 출력 없음
+                    )
+
             # 사용자 입력이 있거나 step.user_prompt가 없으면 LLM이 상황을 판단하여 상태 결정
             messages = [
                 {
                     "role": "system",
-                    "content": """당신은 사용자와 대화하는 Q&A Agent입니다.
+                    "content": """당신은 시스템의 대표 화자입니다.
+사용자는 당신과 대화하고 있으며, 내부 Agent 구조를 알 필요가 없습니다.
 
-**상태 결정 규칙** (매우 중요!):
-1. **사용자 입력이 이미 제공된 경우** (user_context 또는 현재 사용자 입력에 있음):
-   - **정보 수집 단계인 경우** (Worker Agent 결과가 아직 없는 경우):
-     * 기본 정보(위치, 인원, 시간 등)가 충분히 수집되었으면 → status: "COMPLETED" (Worker Agent가 작업할 수 있도록 진행)
-     * 기본 정보가 부족하면 → status: "WAITING_USER" (추가 질문 작성)
-   - **Worker Agent 결과가 있는 경우**:
-     * 사용자가 선택/확인을 완료했으면 → status: "COMPLETED" (다음 단계로 진행)
-     * 추가 확인이 필요하면 → status: "WAITING_USER" (확인 질문 작성)
-   - **절대로 같은 질문을 반복하지 마세요!**
-   
-2. **사용자 입력이 없는 경우**:
-   - 필요한 정보를 물어보는 질문 작성 → status: "WAITING_USER"
+**핵심 원칙**:
+- 당신은 중재자이자 통역자입니다
+- 절대 시스템 내부 상태를 설명하지 마세요
+- 사용자에게 지금 필요한 행동 하나만 제시하세요
 
-**중요**: 정보 수집 단계에서 사용자로부터 기본 정보(위치, 인원, 시간, 선호도 등)를 받았으면, 완벽하지 않더라도 Worker Agent가 작업을 시작할 수 있도록 status: "COMPLETED"를 반환하세요.
+**메시지 패턴**:
+당신의 모든 메시지는 다음 3가지 중 하나입니다:
+
+1. **ASK (정보 요청)**: 작업 진행에 필요한 정보를 물어봅니다
+   예: "위치와 인원, 시간을 알려주세요"
+
+2. **INFORM (사실 전달)**: 확정된 내용이나 결과를 전달합니다
+   예: "을지로, 2명, 12시 30분으로 확인했습니다"
+   예: "조건에 맞는 메뉴를 찾았어요: 1) 돈카츠 2) 초밥 3) 규동"
+
+3. **CONFIRM (선택/확인)**: 사용자의 선택이나 진행 여부를 확인합니다
+   예: "어떤 메뉴로 할까요?"
+   예: "이대로 진행할까요?"
+
+**상태 결정 규칙**:
+- 사용자에게 추가로 물어볼 것이 있으면 → status: "WAITING_USER"
+- 사용자가 필요한 정보/선택을 제공했으면 → status: "COMPLETED"
+- 같은 질문을 반복하지 마세요
+- **이미 확정된 정보는 절대 다시 묻지 마세요!**
 
 **메시지 작성 규칙**:
-1. 아래 'Worker Agent 작업 결과'는 사용자에게 **표시되지 않은 내부 정보**입니다
-2. **반드시 먼저 Worker Agent의 작업 결과를 요약해서 사용자에게 설명**해야 합니다
-3. 설명 없이 질문만 하면 안 됩니다
-4. 사용자가 이미 답변한 내용을 고려하여 응답하세요
+1. 필요한 경우 지금까지 확정된 내용 1~2줄 요약
+2. 지금 사용자에게 필요한 행동 하나
+3. 선택지 또는 질문
 
 다음 JSON 형식으로 응답하세요:
 ```json
 {
   "status": "WAITING_USER" 또는 "COMPLETED",
-  "message": "사용자에게 보여줄 메시지 (Worker Agent 결과 요약 포함 필수)"
+  "message": "사용자에게 보여줄 메시지"
 }
 ```
 
-예시 (질문 필요 - 사용자 입력 없음):
+**좋은 예시**:
+
+정보 수집 (ASK):
 {
   "status": "WAITING_USER",
-  "message": "점심 메뉴 추천과 근처 식당 예약을 도와드릴게요. 아래 정보를 알려주세요:\n- 위치\n- 인원\n- 시간"
+  "message": "점심 메뉴 추천과 예약을 도와드릴게요 🙂\n\n먼저 몇 가지만 알려주세요:\n• 위치\n• 인원\n• 시간"
 }
 
-예시 (정보 수집 완료 - COMPLETED 반환):
+정보 확인 (INFORM):
 {
   "status": "COMPLETED",
-  "message": "을지로, 인원 2명, 점심 시간으로 확인했습니다. 메뉴를 추천해드리겠습니다."
+  "message": "을지로, 2명, 오늘 12시 30분으로 확인했습니다."
 }
 
-예시 (Worker Agent 결과 후 - 사용자 선택 확인):
+결과 전달 + 선택 요청 (INFORM + CONFIRM):
 {
   "status": "WAITING_USER",
-  "message": "점심 메뉴를 추천해드렸어요:\n\n- 국수/냉면: 시원하고 담백하게 빠르게 먹기 좋음 (12,000-18,000원)\n- 한식 백반/국밥: 든든하고 가성비 좋음 (8,000-12,000원)\n\n위 메뉴 중 어떤 걸로 하실까요?"
+  "message": "조건에 맞는 점심 메뉴를 찾았어요:\n\n1) 돈카츠 정식 – 빠르고 든든\n2) 회전초밥 – 가볍고 깔끔\n3) 규동 – 빠른 한 끼\n\n어떤 메뉴로 할까요?"
 }
+
+선택 확인 (CONFIRM):
+{
+  "status": "COMPLETED",
+  "message": "알겠습니다 👍\n그럼 돈카츠 정식 기준으로 근처 식당을 찾아볼게요."
+}
+
+**🔴 Context / Message 분리 원칙** (반드시 지켜야 할 것):
+
+1. **Context is for knowing, Message is for talking**
+   - 확정된 정보, Worker 결과, 내부 상태는 Context입니다
+   - 당신은 Context를 참고만 하고, **절대 나열하거나 요약하지 마세요**
+
+2. **지금 필요한 질문 1개만 생성**
+   - "을지로, 2명으로 확인했습니다..." ❌ (Context 나열)
+   - "시간은 언제가 좋을까요?" ✅ (질문만)
+
+3. **당신은 대화를 끝내지 않습니다**
+   - "모든 정보를 확인했습니다" ❌
+   - "예약까지 모두 완료했어요" ❌
+   - 최종 요약과 마무리는 Orchestrator의 책임
+
+4. **Worker 결과를 요약하지 마세요**
+   - Worker가 준 정보는 Context입니다
+   - "조건에 맞는 메뉴를 찾았어요: 1) 돈카츠..." ✅ (자연스러운 전달)
+   - "Worker Agent가 3개 메뉴를 추천했습니다..." ❌ (요약)
+
+**나쁜 예시** (절대 이렇게 하지 마세요):
+❌ "을지로, 2명, 12시 30분으로 확인했습니다" (Context 나열)
+❌ "필요한 정보를 모두 확인했습니다" (종료 문구)
+❌ "Worker Agent 결과가 아직 없습니다" (내부 상태)
+❌ "정보 수집 단계입니다" (내부 상태)
+❌ "다음 단계로 진행합니다" (내부 상태)
+
+**좋은 예시**:
+✅ "시간은 언제가 좋을까요?" (질문만)
+✅ "어떤 메뉴로 할까요?" (질문만)
+✅ "이 중 하나로 예약할까요?" (질문만)
 """
                 },
                 {
                     "role": "user",
-                    "content": f"""**원래 요청**: {workflow.original_request}
+                    "content": f"""**사용자 요청**: {workflow.original_request}
 
-**Worker Agent 작업 결과** (사용자에게 표시되지 않음 - 반드시 먼저 요약 설명 필요):
+**현재 단계**: {step.description}
+
+---
+
+**🔒 Context** (for reference only - DO NOT list or summarize in your message):
+
+확정된 정보 (절대 다시 묻지 말 것):
+{workflow.conversation_state.get_facts_text() if workflow.conversation_state else '(없음)'}
+
+미확정 정보 (필요한 facts):
+{', '.join(workflow.task_schema.get_missing_facts(workflow.conversation_state)) if workflow.task_schema and workflow.conversation_state else '(없음)'}
+
+의사결정 상태:
+{workflow.conversation_state.get_decisions_text() if workflow.conversation_state else '(없음)'}
+
+Worker 결과:
 {worker_context}
 
-**사용자 이전 응답**:
+대화 기록:
 {user_context}
 
-**담당 작업**: {step.description}
+---
 
-**중요**: 
-- **Worker Agent 작업 결과가 없는 경우** (정보 수집 단계):
-  - 사용자 입력이 이미 제공된 경우: 기본 정보(위치, 인원, 시간 등)가 있으면 → status: "COMPLETED" 반환 (Worker Agent가 작업 시작)
-  - 사용자 입력이 없는 경우: 필요한 정보를 물어보는 질문 작성 → status: "WAITING_USER"
-- **Worker Agent 작업 결과가 있는 경우**:
-  - 사용자 입력이 이미 제공된 경우: 선택/확인 완료했으면 → status: "COMPLETED", 추가 확인 필요하면 → status: "WAITING_USER"
-  - 사용자 입력이 없는 경우: Worker Agent 결과를 요약하고 질문 작성 → status: "WAITING_USER"
+**💬 Your Task**:
+위 Context를 참고하여, 사용자에게 **지금 필요한 질문 1개만** 생성하세요.
 
-위 정보를 바탕으로:
-1. 사용자 입력이 더 필요한지, 아니면 최종 응답만 하면 되는지 판단
-2. Worker Agent 작업 결과를 **반드시 먼저 요약해서 사용자에게 설명** (절대 생략 불가!)
-3. 그 다음 질문 또는 최종 응답 작성
+🔴 절대 금지:
+1. 확정된 정보 나열 ❌ ("을지로, 2명으로 확인했습니다")
+2. Worker 결과 나열 ❌ ("메뉴 옵션은 한식, 일식, 중식입니다")
+3. Context 요약 ❌ ("지금까지 수집한 정보는...")
+4. 상태 설명 ❌ ("확인했습니다", "진행하겠습니다")
+
+✅ 올바른 예시:
+- "예약자 성함을 알려주실 수 있을까요?" (질문만)
+- "연락처를 알려주세요" (질문만)
+- "이대로 진행할까요?" (확인 질문만)
 
 JSON 형식으로 응답하세요."""
                 }
@@ -865,34 +1219,13 @@ JSON 형식으로 응답하세요."""
                 result_data = json.loads(response)
                 status_str = result_data.get("status", "COMPLETED").upper()
                 message = result_data.get("message", "작업이 완료되었습니다.")
-                
-                # Worker Agent 결과가 있는데 응답에 포함되지 않았으면 강제로 포함
-                if worker_results_data and worker_context.strip() != "아직 작업 결과가 없습니다.":
-                    latest_worker_result = worker_results_data[-1]
-                    worker_result_text = latest_worker_result['result']
-                    worker_agent_name = latest_worker_result['agent_name']
-                    
-                    result_preview = worker_result_text[:150].replace('\n', ' ')
-                    has_result_in_response = result_preview in message or any(
-                        keyword in message 
-                        for keyword in result_preview.split()[:5]
-                    )
-                    
-                    if not has_result_in_response:
-                        result_summary = worker_result_text[:500]
-                        if len(worker_result_text) > 500:
-                            result_summary += "..."
-                        
-                        if "점심" in worker_agent_name or "메뉴" in worker_agent_name:
-                            summary_header = "점심 메뉴 추천을 드렸습니다:\n\n"
-                        elif "식당" in worker_agent_name or "장소" in worker_agent_name:
-                            summary_header = "식당 추천을 드렸습니다:\n\n"
-                        else:
-                            summary_header = f"{worker_agent_name} 작업 결과:\n\n"
-                        
-                        message = f"{summary_header}{result_summary}\n\n{message}"
-                        print(f"[DynamicOrchestration] Worker Agent 결과를 응답에 강제 포함: {worker_agent_name}")
-                
+
+                # 🔴 Context/Message 분리 원칙:
+                # Worker 결과는 Context이므로 Q&A Agent 메시지에 강제로 붙이지 않습니다.
+                # Worker 결과는 이미 Q&A Agent 프롬프트에 제공되었고,
+                # LLM이 필요하면 자연스럽게 언급할 것입니다.
+                # 강제로 붙이면 정보 덤핑이 발생합니다.
+
                 # 상태에 따라 AgentResult 반환
                 if status_str == "WAITING_USER":
                     return waiting_user(
@@ -932,43 +1265,166 @@ JSON 형식으로 응답하세요."""
     
     async def _generate_final_answer(self, task_id: str) -> Optional[str]:
         """
-        모든 스텝 완료 후 최종 응답 생성
+        모든 스텝 완료 후 Orchestrator Final Narration 생성
+
+        Orchestrator = Final Narrator:
+        - Agent 이름 언급 ❌
+        - "모든 작업이 완료되었습니다" ❌
+        - 사람처럼 정리 + 다음 액션 제시 ✅
         """
         workflow = self._workflows.get(task_id)
         if not workflow:
             return None
-        
-        workflow.phase = WorkflowPhase.COMPLETED
-        
-        # 모든 결과 수집
-        all_results = workflow.get_completed_results()
-        
-        # 최종 응답 생성
-        if all_results:
-            summary = "\n\n".join([
-                f"**{r['agent_name']}**: {r['result']}"
-                for r in all_results
-                if r.get('result')
-            ])
-            final_message = f"✅ 모든 작업이 완료되었습니다.\n\n{summary}"
-        else:
-            final_message = "✅ 작업이 완료되었습니다."
-        
-        # WebSocket으로 최종 응답 전송
-        if self.ws_server:
-            self.ws_server.broadcast_task_interaction(
-                task_id=task_id,
-                role='agent',
-                message=final_message,
-                agent_id="orchestrator-system",
-                agent_name="Orchestration Agent"
-            )
-        
+
+        # FINALIZING Phase 진입
+        workflow.phase = WorkflowPhase.FINALIZING
+
         self._log("orchestrator-system", "Orchestration Agent", "info",
-                  "🎉 워크플로우 완료",
+                  "🎯 최종 정리 중 (Final Narration)",
                   task_id=task_id)
-        
-        return final_message
+
+        # 모든 Worker 결과 수집 (Q&A 제외)
+        all_results = workflow.get_completed_results()
+        worker_results = [
+            r for r in all_results
+            if r.get('agent_role') != AgentRole.Q_AND_A and r.get('result')
+        ]
+
+        # Worker 결과 텍스트 생성
+        worker_context = "\n\n---\n\n".join([
+            f"[{r['agent_name']}의 작업 결과]\n{r['result']}"
+            for r in worker_results
+        ]) if worker_results else "(내부 작업 결과 없음)"
+
+        # ConversationState에서 확정된 정보 수집
+        confirmed_info = ""
+        if workflow.conversation_state:
+            confirmed_info = workflow.conversation_state.get_facts_text()
+
+        # Final Narration LLM 프롬프트
+        messages = [
+            {
+                "role": "system",
+                "content": """당신은 Orchestrator입니다.
+모든 작업이 완료되었으므로, 이제 사용자에게 최종 정리를 해줄 차례입니다.
+
+**당신의 역할**:
+당신은 시스템의 "Final Narrator"입니다.
+사용자가 요청한 작업의 결과를 사람처럼 정리하고, 다음 행동을 제시합니다.
+
+**출력 규칙**:
+1. Agent 이름을 언급하지 마세요 (❌ "Worker Agent가...", "Q&A Agent가...")
+2. 시스템 내부 상태를 설명하지 마세요 (❌ "모든 작업이 완료되었습니다")
+3. 확정된 정보를 자연스럽게 요약하세요
+4. Worker 결과를 사람이 말하듯 정리하세요
+5. 다음 행동 1가지만 제시하세요 (선택지 또는 질문)
+
+**좋은 예시**:
+```
+정리해볼게요 🙂
+
+오늘 점심은 아래 조건으로 진행하면 좋아요:
+- 위치: 을지로
+- 인원: 2명
+- 메뉴: 돈카츠
+
+이 조건으로 예약 가능한 곳은:
+1) 경양카츠 명동점 (13:00 / 13:10 / 13:30)
+2) 돈가스클럽 을지로점 (12:30 / 13:00)
+
+이 중 하나로 예약할까요?
+아니면 다른 메뉴를 더 볼까요?
+```
+
+**나쁜 예시** (절대 이렇게 하지 마세요):
+❌ "모든 작업이 완료되었습니다"
+❌ "Worker Agent의 결과입니다"
+❌ "Q&A Agent가 수집한 정보입니다"
+❌ "다음 단계로 진행합니다"
+
+**메시지 작성 방법**:
+1. "정리해볼게요" 또는 자연스러운 시작
+2. 확정된 정보 요약 (2-3줄)
+3. Worker 결과 요약 (사람이 말하듯)
+4. 다음 행동 1가지 (질문 또는 선택지)
+
+자연스럽고 친근한 톤으로 작성하세요.
+"""
+            },
+            {
+                "role": "user",
+                "content": f"""**사용자의 원래 요청**:
+{workflow.original_request}
+
+**확정된 정보** (사용자가 제공한 정보):
+{confirmed_info if confirmed_info else '(없음)'}
+
+**내부 작업 결과** (사용자에게 직접 표시되지 않은 결과):
+{worker_context}
+
+---
+
+위 정보를 바탕으로, 사용자에게 최종 정리와 다음 행동을 제시하는 메시지를 작성하세요.
+
+중요:
+- Agent 이름 절대 언급 금지
+- "완료되었습니다" 같은 시스템 멘트 금지
+- 사람처럼 자연스럽게 정리
+- 다음 행동 1가지만 제시
+"""
+            }
+        ]
+
+        try:
+            # LLM 호출하여 Final Narration 생성
+            final_narration = await call_llm(messages, max_tokens=2000)
+
+            if not final_narration:
+                # LLM 실패 시 기본 메시지
+                final_narration = f"{workflow.original_request}에 대한 작업을 완료했어요."
+
+            # COMPLETED Phase로 전환
+            workflow.phase = WorkflowPhase.COMPLETED
+
+            # TaskStateManager: Task를 COMPLETED로
+            self.task_state_manager.complete_execution(task_id, success=True)
+
+            # WebSocket으로 Final Narration 전송 (Chat에만 표시)
+            if self.ws_server:
+                self.ws_server.broadcast_task_interaction(
+                    task_id=task_id,
+                    role='agent',
+                    message=final_narration,
+                    agent_id="orchestrator-final",
+                    agent_name="Assistant"  # 사용자에게는 "Assistant"로 표시
+                )
+
+            self._log("orchestrator-system", "Orchestration Agent", "info",
+                      "✅ Final Narration 완료",
+                      details=final_narration[:100],
+                      task_id=task_id)
+
+            return final_narration
+
+        except Exception as e:
+            self._log("orchestrator-system", "Orchestration Agent", "error",
+                      f"❌ Final Narration 생성 실패: {str(e)}",
+                      task_id=task_id)
+
+            # 실패 시 기본 응답
+            fallback_message = f"{workflow.original_request}에 대한 작업을 완료했어요."
+
+            if self.ws_server:
+                self.ws_server.broadcast_task_interaction(
+                    task_id=task_id,
+                    role='agent',
+                    message=fallback_message,
+                    agent_id="orchestrator-final",
+                    agent_name="Assistant"
+                )
+
+            workflow.phase = WorkflowPhase.COMPLETED
+            return fallback_message
     
     def _log(
         self,

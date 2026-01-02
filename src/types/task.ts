@@ -1,7 +1,7 @@
 // Task 타입 정의
 import type { AgentLifecycleStatus } from './agentResult';
 
-export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled';
+export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled' | 'failed';
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 export type TaskSource = 'manual' | 'slack' | 'confluence' | 'email' | 'other';
 
