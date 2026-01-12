@@ -47,6 +47,16 @@ interface TaskState {
   addAgentLog: (log: AgentLog) => void;
   setAgentLogs: (logs: AgentLog[]) => void;
   getTaskLogs: (taskId: string) => AgentLog[];
+
+  // Task graph
+  taskGraphs: Record<string, any>;
+  setTaskGraph: (taskId: string, graph: any) => void;
+  getTaskGraph: (taskId: string) => any;
+
+  // Agent memory
+  agentMemories: Record<string, { memories: any[]; stats: any }>;
+  setAgentMemory: (agentId: string, memories: any[], stats: any) => void;
+  getAgentMemory: (agentId: string) => { memories: any[]; stats: any } | undefined;
 }
 
 export const useTaskStore = create<TaskState>((set, get) => {
@@ -71,6 +81,8 @@ export const useTaskStore = create<TaskState>((set, get) => {
     interactions: [],
     taskChatMessages: [],
     agentLogs: [],
+    taskGraphs: {},
+    agentMemories: {},
 
     // Actions
     setTasks: (tasks) => {
@@ -245,5 +257,26 @@ export const useTaskStore = create<TaskState>((set, get) => {
 
     getTaskLogs: (taskId) =>
       get().agentLogs.filter((log) => log.relatedTaskId === taskId),
+
+    // Task graph
+    setTaskGraph: (taskId, graph) =>
+      set((state) => ({
+        taskGraphs: { ...state.taskGraphs, [taskId]: graph }
+      })),
+
+    getTaskGraph: (taskId) =>
+      get().taskGraphs[taskId] || null,
+
+    // Agent memory
+    setAgentMemory: (agentId, memories, stats) =>
+      set((state) => ({
+        agentMemories: {
+          ...state.agentMemories,
+          [agentId]: { memories, stats }
+        }
+      })),
+
+    getAgentMemory: (agentId) =>
+      get().agentMemories[agentId],
   };
 });

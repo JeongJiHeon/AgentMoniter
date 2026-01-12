@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from .orchestration import call_llm
+from models.orchestration import call_llm
 from .agent_result import AgentResult, AgentLifecycleStatus
 
 

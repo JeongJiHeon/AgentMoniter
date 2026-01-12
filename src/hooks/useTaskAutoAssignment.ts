@@ -102,7 +102,12 @@ export function useTaskAutoAssignment(orchestrationService: OrchestrationService
 
             console.log(`[AutoAssignment] Multi-agent plan for task ${task.id}:`, plan.agents.map((a) => a.agentName));
           } else {
-            console.warn(`[AutoAssignment] No agents selected for task ${task.id}`);
+            console.warn(`[AutoAssignment] No agents selected for task ${task.id}`, {
+              taskId: task.id,
+              taskTitle: task.title,
+              availableAgentsCount: allAgents.length,
+              availableAgents: allAgents.map(a => ({ id: a.id, name: a.name })),
+            });
           }
         })
         .catch((error) => {

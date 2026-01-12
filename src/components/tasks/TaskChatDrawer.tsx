@@ -105,7 +105,7 @@ export function TaskChatDrawer({ isOpen, onClose, task, messages, onSendMessage 
             <textarea
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
-              onKeyPress={handleKeyPress}
+              onKeyDown={handleKeyPress}
               placeholder="Type your message..."
               className="flex-1 px-3 py-2 bg-slate-700 text-white rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
               rows={3}

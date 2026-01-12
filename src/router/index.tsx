@@ -1,9 +1,9 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom';
 import App from '../App';
-import { DashboardPage } from '../pages/DashboardPage';
-import { TasksPage } from '../pages/TasksPage';
-import { PersonalizationPage } from '../pages/PersonalizationPage';
-import { SettingsPage } from '../pages/SettingsPage';
+import { EnhancedDashboardPage } from '../pages/EnhancedDashboardPage';
+import { EnhancedTasksPage } from '../pages/EnhancedTasksPage';
+import { EnhancedPersonalizationPage } from '../pages/EnhancedPersonalizationPage';
+import { EnhancedSettingsPage } from '../pages/EnhancedSettingsPage';
 
 export const router = createBrowserRouter([
   {
@@ -16,19 +16,19 @@ export const router = createBrowserRouter([
       },
       {
         path: 'dashboard',
-        element: <DashboardPage />,
+        element: <EnhancedDashboardPage />,
       },
       {
         path: 'tasks',
-        element: <TasksPage />,
+        element: <EnhancedTasksPage />,
       },
       {
         path: 'personalization',
-        element: <PersonalizationPage />,
+        element: <EnhancedPersonalizationPage />,
       },
       {
         path: 'settings',
-        element: <SettingsPage />,
+        element: <EnhancedSettingsPage />,
       },
     ],
   },

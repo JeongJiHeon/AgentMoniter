@@ -48,6 +48,10 @@ from .task_state import (
     task_state_manager
 )
 
+# MCP Agents (Background Workers)
+from .notion_mcp_agent import NotionMCPAgent, notion_mcp_agent
+from .slack_mcp_agent import SlackMCPAgent, slack_mcp_agent
+
 
 # =============================================================================
 # Enums & Types
@@ -161,6 +165,12 @@ class DynamicOrchestrationEngine:
         self.ws_server: Any = None
         self.task_state_manager = task_state_manager
 
+        # MCP Agent 인스턴스 (백그라운드 Worker)
+        self._mcp_agents: Dict[str, Any] = {
+            "notion-mcp": notion_mcp_agent,
+            "slack-mcp": slack_mcp_agent,
+        }
+
         # 시스템 Agent 정의
         self.system_agents = {
             "orchestrator": {
@@ -177,6 +187,17 @@ class DynamicOrchestrationEngine:
                 "id": "qa-agent-system",
                 "name": "Q&A Agent",
                 "role": AgentRole.Q_AND_A
+            },
+            # MCP Agents (Background Workers)
+            "notion-mcp": {
+                "id": "notion-mcp-agent",
+                "name": "Notion MCP Agent",
+                "role": AgentRole.WORKER
+            },
+            "slack-mcp": {
+                "id": "slack-mcp-agent",
+                "name": "Slack MCP Agent",
+                "role": AgentRole.WORKER
             }
         }
 
@@ -190,8 +211,65 @@ class DynamicOrchestrationEngine:
     def set_ws_server(self, ws_server: Any) -> None:
         """WebSocket 서버 설정 및 이벤트 핸들러 연결"""
         self.ws_server = ws_server
+        self._setup_event_handlers()
 
-        # TaskStateManager 이벤트 핸들러 설정
+    def configure_notion_agent(self, api_key: str) -> bool:
+        """
+        Notion MCP Agent 설정
+
+        Args:
+            api_key: Notion Integration API Key
+
+        Returns:
+            설정 성공 여부
+        """
+        try:
+            notion_agent = self._mcp_agents.get("notion-mcp")
+            if notion_agent:
+                notion_agent.configure(api_key)
+                print(f"[DynamicOrchestration] Notion MCP Agent configured")
+                return True
+            return False
+        except Exception as e:
+            print(f"[DynamicOrchestration] Failed to configure Notion Agent: {e}")
+            return False
+
+    def configure_slack_agent(
+        self,
+        bot_token: str = None,
+        webhook_url: str = None
+    ) -> bool:
+        """
+        Slack MCP Agent 설정
+
+        Args:
+            bot_token: Slack Bot OAuth Token
+            webhook_url: Slack Webhook URL
+
+        Returns:
+            설정 성공 여부
+        """
+        try:
+            slack_agent = self._mcp_agents.get("slack-mcp")
+            if slack_agent:
+                slack_agent.configure(bot_token, webhook_url)
+                print(f"[DynamicOrchestration] Slack MCP Agent configured")
+                return True
+            return False
+        except Exception as e:
+            print(f"[DynamicOrchestration] Failed to configure Slack Agent: {e}")
+            return False
+
+    def get_mcp_agent(self, agent_type: str) -> Optional[Any]:
+        """MCP Agent 인스턴스 조회"""
+        return self._mcp_agents.get(agent_type)
+
+    def get_available_mcp_agents(self) -> List[str]:
+        """사용 가능한 MCP Agent 타입 목록"""
+        return list(self._mcp_agents.keys())
+
+    def _setup_event_handlers(self) -> None:
+        """TaskStateManager 이벤트 핸들러 설정"""
         def on_task_status_change(event: Dict[str, Any]) -> None:
             if self.ws_server:
                 self.ws_server.broadcast_task_status_change(event)
@@ -208,6 +286,91 @@ class DynamicOrchestrationEngine:
 
         self.task_state_manager.set_status_change_handler(on_task_status_change)
         self.task_state_manager.set_agent_change_handler(on_agent_status_change)
+    
+    def _convert_workflow_to_graph(self, workflow: DynamicWorkflow) -> Dict[str, Any]:
+        """
+        DynamicWorkflow를 TaskGraph 형식으로 변환
+        
+        Args:
+            workflow: DynamicWorkflow 인스턴스
+            
+        Returns:
+            TaskGraph dict 형식의 데이터
+        """
+        nodes = {}
+        
+        # 각 step을 node로 변환
+        for step in workflow.steps:
+            # 직전 step만 dependency로 설정 (순차 실행)
+            dependencies = []
+            if step.order > 1:
+                # 바로 이전 step만 dependency
+                dependencies = [f"step_{step.order - 1}"]
+            
+            # Status 매핑
+            status_map = {
+                "pending": "pending",
+                "running": "running",
+                "waiting_user": "running",  # waiting도 running으로 표시
+                "completed": "completed",
+                "failed": "failed"
+            }
+            graph_status = status_map.get(step.status, "pending")
+            
+            node_id = f"step_{step.order}"
+            nodes[node_id] = {
+                "id": node_id,
+                "name": step.description or f"{step.agent_name} - Step {step.order}",
+                "label": step.description or f"{step.agent_name} - Step {step.order}",
+                "description": step.description,
+                "dependencies": dependencies,
+                "status": graph_status,
+                "task_type": "agent_step",
+                "task_data": {
+                    "agent_id": step.agent_id,
+                    "agent_name": step.agent_name,
+                    "agent_role": step.agent_role.value if hasattr(step.agent_role, 'value') else str(step.agent_role),
+                    "order": step.order,
+                    "result": step.result,
+                },
+                "metadata": {
+                    "started_at": step.started_at.isoformat() if step.started_at else None,
+                    "completed_at": step.completed_at.isoformat() if step.completed_at else None,
+                },
+                "created_at": workflow.created_at.isoformat(),
+            }
+        
+        graph_data = {
+            "name": workflow.original_request[:50] if workflow.original_request else f"Workflow {workflow.task_id}",
+            "nodes": nodes,
+            "stats": {
+                "total_tasks": len(nodes),
+                "status_counts": {
+                    "pending": sum(1 for n in nodes.values() if n["status"] == "pending"),
+                    "running": sum(1 for n in nodes.values() if n["status"] == "running"),
+                    "completed": sum(1 for n in nodes.values() if n["status"] == "completed"),
+                    "failed": sum(1 for n in nodes.values() if n["status"] == "failed"),
+                }
+            }
+        }
+        
+        return graph_data
+    
+    def _update_task_graph(self, task_id: str) -> None:
+        """워크플로우를 graph로 변환하여 저장"""
+        workflow = self._workflows.get(task_id)
+        if not workflow or not self.ws_server:
+            return
+        
+        try:
+            graph_data = self._convert_workflow_to_graph(workflow)
+            self.ws_server.save_task_graph(task_id, graph_data)
+            # 실시간으로 클라이언트에 전송
+            self.ws_server.broadcast_task_graph(task_id, graph_data)
+        except Exception as e:
+            print(f"[DynamicOrchestration] Error updating task graph: {e}")
+            import traceback
+            traceback.print_exc()
     
     async def _get_lock(self, task_id: str) -> asyncio.Lock:
         """task_id별 Lock 획득"""
@@ -271,6 +434,9 @@ class DynamicOrchestrationEngine:
             self._log("orchestrator-system", "Orchestration Agent", "error",
                       "❌ 요청 분석 실패", task_id=task_id)
             return "요청을 분석할 수 없습니다. 다시 시도해주세요."
+        
+        # 초기 plan이 생성된 후 graph 업데이트
+        self._update_task_graph(task_id)
         
         # 2. 워크플로우 실행
         return await self._execute_workflow(task_id)
@@ -392,6 +558,9 @@ class DynamicOrchestrationEngine:
                       f"✅ 작업 완료",
                       details=(result.message[:100] + "..." if result.message and len(result.message) > 100 else result.message) if result.message else "",
                       task_id=task_id)
+
+            # Task graph 업데이트
+            self._update_task_graph(task_id)
 
             # Q&A Agent의 최종 응답은 사용자에게 표시
             if current_step.agent_role == AgentRole.Q_AND_A and self.ws_server and result.message:
@@ -707,6 +876,9 @@ class DynamicOrchestrationEngine:
             # 스텝 실행
             current_step.status = "running"
             current_step.started_at = datetime.now()
+            
+            # Task graph 업데이트
+            self._update_task_graph(task_id)
 
             # TaskStateManager: Agent 실행 상태로 설정
             execution = self.task_state_manager.get_execution(task_id)
@@ -901,11 +1073,51 @@ class DynamicOrchestrationEngine:
         """
         Worker Agent 실행
         AgentResult를 반환하여 상태를 명시적으로 선언
+
+        MCP Agent인 경우 해당 Agent의 execute_task를 호출합니다.
         """
         workflow = self._workflows.get(task_id)
         if not workflow:
             return failed("워크플로우를 찾을 수 없습니다.")
-        
+
+        # MCP Agent 체크 - agent_id에서 타입 추출
+        agent_type = None
+        for mcp_type in self._mcp_agents.keys():
+            if mcp_type in step.agent_id or mcp_type in step.agent_name.lower():
+                agent_type = mcp_type
+                break
+
+        # MCP Agent인 경우 해당 Agent의 execute_task 호출
+        if agent_type and agent_type in self._mcp_agents:
+            mcp_agent = self._mcp_agents[agent_type]
+
+            # Context 구성
+            context = {
+                "task_id": task_id,
+                "original_request": workflow.original_request,
+                "user_input": user_input,
+                "previous_results": workflow.get_completed_results(),
+            }
+
+            # ConversationState에서 Facts/Decisions 추가
+            if workflow.conversation_state:
+                context["facts"] = workflow.conversation_state.facts
+                context["decisions"] = workflow.conversation_state.decisions
+
+            self._log(step.agent_id, step.agent_name, "info",
+                      f"🔌 MCP Agent 실행: {agent_type}",
+                      task_id=task_id)
+
+            try:
+                result = await mcp_agent.execute_task(step.description, context)
+                return result
+            except Exception as e:
+                self._log(step.agent_id, step.agent_name, "error",
+                          f"❌ MCP Agent 실행 실패: {str(e)}",
+                          task_id=task_id)
+                return failed(f"MCP Agent 실행 실패: {str(e)}")
+
+        # 일반 Worker Agent (LLM 기반)
         # 이전 결과들을 컨텍스트로 포함
         prev_results = workflow.get_completed_results()
         prev_text = ""
@@ -915,18 +1127,18 @@ class DynamicOrchestrationEngine:
                 for r in prev_results
                 if r['result']
             ])
-            
+
             # 사용자 입력도 포함
             user_inputs = [r for r in prev_results if r.get('user_input')]
             if user_inputs:
                 prev_text += "\n\n**사용자 선택:**\n" + "\n".join([
                     f"- {r['user_input']}" for r in user_inputs
                 ])
-        
+
         # 현재 사용자 입력도 포함 (resume_with_user_input에서 전달된 경우)
         if user_input:
             prev_text += f"\n\n**현재 사용자 입력:**\n{user_input}"
-        
+
         messages = [
             {
                 "role": "system",
@@ -944,7 +1156,7 @@ class DynamicOrchestrationEngine:
 작업을 수행하고 결과를 알려주세요."""
             }
         ]
-        
+
         try:
             response = await call_llm(messages, max_tokens=8000)
             if response:
@@ -1379,9 +1591,11 @@ JSON 형식으로 응답하세요."""
             # LLM 호출하여 Final Narration 생성
             final_narration = await call_llm(messages, max_tokens=2000)
 
-            if not final_narration:
-                # LLM 실패 시 기본 메시지
-                final_narration = f"{workflow.original_request}에 대한 작업을 완료했어요."
+            if not final_narration or not final_narration.strip():
+                # LLM 실패 시 자연스러운 fallback 메시지 생성
+                final_narration = self._generate_fallback_message(
+                    workflow, confirmed_info, worker_context
+                )
 
             # COMPLETED Phase로 전환
             workflow.phase = WorkflowPhase.COMPLETED
@@ -1411,8 +1625,10 @@ JSON 형식으로 응답하세요."""
                       f"❌ Final Narration 생성 실패: {str(e)}",
                       task_id=task_id)
 
-            # 실패 시 기본 응답
-            fallback_message = f"{workflow.original_request}에 대한 작업을 완료했어요."
+            # 실패 시 자연스러운 fallback 메시지 생성
+            fallback_message = self._generate_fallback_message(
+                workflow, confirmed_info, worker_context
+            )
 
             if self.ws_server:
                 self.ws_server.broadcast_task_interaction(
@@ -1425,6 +1641,44 @@ JSON 형식으로 응답하세요."""
 
             workflow.phase = WorkflowPhase.COMPLETED
             return fallback_message
+    
+    def _generate_fallback_message(
+        self,
+        workflow: DynamicWorkflow,
+        confirmed_info: str,
+        worker_context: str
+    ) -> str:
+        """
+        Fallback 응답 생성 (LLM 실패 시)
+        대화 맥락을 활용하여 자연스러운 메시지 생성
+
+        Args:
+            workflow: 워크플로우
+            confirmed_info: 확정된 정보
+            worker_context: Worker 작업 결과
+
+        Returns:
+            자연스러운 fallback 메시지
+        """
+        # 확정된 정보가 있으면 활용
+        if confirmed_info and confirmed_info.strip() and confirmed_info != "(없음)":
+            # 간단히 요약하여 자연스럽게 표현
+            info_lines = confirmed_info.split('\n')[:3]  # 최대 3줄만
+            info_summary = '\n'.join(info_lines)
+            if len(confirmed_info.split('\n')) > 3:
+                info_summary += "\n..."
+            return f"정리해볼게요 🙂\n\n{info_summary}\n\n다음 단계를 진행할까요?"
+
+        # Worker 결과가 있으면 활용
+        if worker_context and worker_context != "(내부 작업 결과 없음)":
+            # 결과에서 핵심만 추출 (첫 200자)
+            result_preview = worker_context[:200]
+            if len(worker_context) > 200:
+                result_preview += "..."
+            return f"다음과 같이 정리했습니다:\n\n{result_preview}\n\n원하시는 대로 진행할까요?"
+
+        # 아무 정보도 없으면 간단한 확인 메시지
+        return "요청하신 내용을 확인했습니다. 추가로 필요한 것이 있으면 알려주세요."
     
     def _log(
         self,

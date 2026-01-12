@@ -12,6 +12,11 @@ interface OutletContext {
   handleAssignAgent: (taskId: string, agentId: string) => void;
   handleRespondInteraction: (interactionId: string, response: string) => void;
   handleSendTaskMessage: (taskId: string, message: string) => void;
+  // Modal controls
+  showCreateTaskModal: boolean;
+  setShowCreateTaskModal: (show: boolean) => void;
+  showCreateAgentModal: boolean;
+  setShowCreateAgentModal: (show: boolean) => void;
 }
 
 export function TasksPage() {
@@ -32,7 +37,13 @@ export function TasksPage() {
   const { tickets, approvalQueue } = useTicketStore();
   const { settings } = useSettingsStore();
 
-  const { handleAssignAgent, handleRespondInteraction, handleSendTaskMessage } = useOutletContext<OutletContext>();
+  const {
+    handleAssignAgent,
+    handleRespondInteraction,
+    handleSendTaskMessage,
+    showCreateTaskModal,
+    setShowCreateTaskModal,
+  } = useOutletContext<OutletContext>();
 
   return (
     <div className="max-w-7xl mx-auto">
@@ -44,7 +55,7 @@ export function TasksPage() {
         agentLogs={agentLogs}
         interactions={interactions}
         taskChatMessages={taskChatMessages}
-        onCreateTask={() => {}} // Will be implemented
+        onCreateTask={() => setShowCreateTaskModal(true)}
         onUpdateTask={updateTask}
         onDeleteTask={deleteTask}
         onClearAllTasks={clearAllTasks}
@@ -57,6 +68,8 @@ export function TasksPage() {
         llmConfig={settings.llmConfig}
         autoAssignMode={autoAssignMode}
         onAutoAssignModeChange={setAutoAssignMode}
+        showCreateTaskModal={showCreateTaskModal}
+        onCloseCreateTaskModal={() => setShowCreateTaskModal(false)}
       />
     </div>
   );

@@ -27,6 +27,9 @@ interface TaskPanelProps {
   llmConfig: LLMConfig;
   autoAssignMode?: 'global' | 'manual';
   onAutoAssignModeChange?: (mode: 'global' | 'manual') => void;
+  // External modal control
+  showCreateTaskModal?: boolean;
+  onCloseCreateTaskModal?: () => void;
 }
 
 export function TaskPanel({
@@ -50,8 +53,20 @@ export function TaskPanel({
   llmConfig,
   autoAssignMode = 'manual',
   onAutoAssignModeChange = () => {},
+  showCreateTaskModal,
+  onCloseCreateTaskModal,
 }: TaskPanelProps) {
-  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  // Internal modal state (used if no external control provided)
+  const [internalModalOpen, setInternalModalOpen] = useState(false);
+
+  // Use external control if provided, otherwise use internal state
+  const isCreateModalOpen = showCreateTaskModal ?? internalModalOpen;
+  const setIsCreateModalOpen = onCloseCreateTaskModal
+    ? (open: boolean) => { if (!open) onCloseCreateTaskModal(); }
+    : setInternalModalOpen;
+
+  // Search state
+  const [searchQuery, setSearchQuery] = useState('');
   const [isAnalyzeModalOpen, setIsAnalyzeModalOpen] = useState(false);
   const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
   const [isManagementPanelOpen, setIsManagementPanelOpen] = useState(false);
@@ -61,8 +76,18 @@ export function TaskPanel({
   const [showAllTasks, setShowAllTasks] = useState(false);
 
   const filteredTasks = tasks.filter(task => {
+    // Status filter
     if (filterStatus !== 'all' && task.status !== filterStatus) return false;
+    // Priority filter
     if (filterPriority !== 'all' && task.priority !== filterPriority) return false;
+    // Search query filter
+    if (searchQuery.trim()) {
+      const query = searchQuery.toLowerCase();
+      const titleMatch = task.title.toLowerCase().includes(query);
+      const descMatch = task.description?.toLowerCase().includes(query);
+      const tagMatch = task.tags.some(tag => tag.toLowerCase().includes(query));
+      if (!titleMatch && !descMatch && !tagMatch) return false;
+    }
     return true;
   });
 
@@ -360,31 +385,63 @@ export function TaskPanel({
         </div>
       </div>
 
-      {/* Filters */}
-      <div className="flex gap-2 mb-4">
-        <select
-          value={filterStatus}
-          onChange={(e) => setFilterStatus(e.target.value as TaskStatus | 'all')}
-          className="flex-1 px-2 py-1 bg-slate-700 border border-slate-600 rounded text-white text-xs focus:outline-none focus:border-blue-500"
-        >
-          <option value="all">전체 상태</option>
-          <option value="pending">대기 중</option>
-          <option value="in_progress">진행 중</option>
-          <option value="completed">완료</option>
-          <option value="cancelled">취소됨</option>
-          <option value="failed">실패</option>
-        </select>
-        <select
-          value={filterPriority}
-          onChange={(e) => setFilterPriority(e.target.value as TaskPriority | 'all')}
-          className="flex-1 px-2 py-1 bg-slate-700 border border-slate-600 rounded text-white text-xs focus:outline-none focus:border-blue-500"
-        >
-          <option value="all">전체 우선순위</option>
-          <option value="low">낮음</option>
-          <option value="medium">보통</option>
-          <option value="high">높음</option>
-          <option value="urgent">긴급</option>
-        </select>
+      {/* Search and Filters */}
+      <div className="flex flex-col sm:flex-row gap-3 mb-4">
+        {/* Search Input */}
+        <div className="relative flex-1">
+          <svg
+            className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+          </svg>
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Task 검색 (제목, 설명, 태그)..."
+            className="w-full pl-10 pr-4 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm placeholder:text-slate-400 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery('')}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          )}
+        </div>
+
+        {/* Filter Dropdowns */}
+        <div className="flex gap-2">
+          <select
+            value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value as TaskStatus | 'all')}
+            className="px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
+          >
+            <option value="all">전체 상태</option>
+            <option value="pending">대기 중</option>
+            <option value="in_progress">진행 중</option>
+            <option value="completed">완료</option>
+            <option value="cancelled">취소됨</option>
+            <option value="failed">실패</option>
+          </select>
+          <select
+            value={filterPriority}
+            onChange={(e) => setFilterPriority(e.target.value as TaskPriority | 'all')}
+            className="px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
+          >
+            <option value="all">전체 우선순위</option>
+            <option value="low">낮음</option>
+            <option value="medium">보통</option>
+            <option value="high">높음</option>
+            <option value="urgent">긴급</option>
+          </select>
+        </div>
       </div>
 
       {/* Task List */}

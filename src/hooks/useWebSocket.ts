@@ -5,28 +5,37 @@ import {
   useTicketStore,
   useChatStore,
   useWebSocketStore,
+  useNotificationStore,
 } from '../stores';
 import type { Agent, Task, AgentLog, Interaction, TaskChatMessage, ChatMessage } from '../types';
 
 interface UseWebSocketOptions {
   url: string;
-  reconnectInterval?: number;
-  maxReconnectAttempts?: number;
 }
 
-export function useWebSocket({
-  url,
-  reconnectInterval = 3000,
-  maxReconnectAttempts = 10,
-}: UseWebSocketOptions) {
+export function useWebSocket({ url }: UseWebSocketOptions) {
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastEventTimestampRef = useRef<number | null>(null); // Track last event timestamp for cursor
+  const connectionToastId = useRef<string | null>(null);
 
   // Store actions
-  const { setConnected, setWebSocket, incrementReconnectAttempts, resetReconnectAttempts } =
-    useWebSocketStore();
+  const {
+    setConnected,
+    setConnectionState,
+    setWebSocket,
+    incrementReconnectAttempts,
+    resetReconnectAttempts,
+    setLastError,
+    setLastDisconnectedAt,
+    processPendingMessages,
+    getBackoffDelay,
+    maxReconnectAttempts,
+  } = useWebSocketStore();
+
+  // Notification store
+  const { addToast, removeToast } = useNotificationStore();
   const { addAgent } = useAgentStore();
-  const { addTask, updateTask, addInteraction, updateInteraction, addTaskChatMessage, addAgentLog } =
+  const { addTask, updateTask, addInteraction, updateInteraction, addTaskChatMessage, addAgentLog, setTaskGraph, setAgentMemory } =
     useTaskStore();
   const { addTicket, updateTicket, addApprovalRequest } = useTicketStore();
   const { addChatMessage } = useChatStore();
@@ -202,6 +211,29 @@ export function useWebSocket({
             break;
           }
 
+          case 'agent_status_change': {
+            const payload = message.payload;
+            // agent_status_change는 agent_id, agent_name, status 등을 포함
+            // AgentExecutionStatus: registered, idle, running, waiting, disabled
+            // 이를 Agent 모델의 status와 매핑
+            const status = payload.status || 'idle';
+            const isActive = status === 'running' || status === 'registered' || status === 'waiting';
+            
+            const agent: Agent = {
+              id: payload.agent_id || payload.id,
+              name: payload.agent_name || payload.name || 'Unknown',
+              type: payload.type || 'custom',
+              thinkingMode: payload.thinkingMode || (status === 'running' ? 'exploring' : 'idle'),
+              currentTask: payload.current_task_id || payload.currentTaskId || null,
+              constraints: [],
+              lastActivity: new Date(payload.last_activity || payload.lastActivity || Date.now()),
+              isActive,
+            };
+            addAgent(agent);
+            console.log(`[WebSocket] Agent status changed: ${agent.name} (${agent.id}), status: ${status}, isActive: ${agent.isActive}`);
+            break;
+          }
+
           case 'system_notification': {
             const payload = message.payload;
             console.log(`[WebSocket] System notification: ${payload.message}`);
@@ -254,6 +286,24 @@ export function useWebSocket({
             break;
           }
 
+          case 'task_graph_update': {
+            const payload = message.payload;
+            console.log(`[WebSocket] Received task_graph_update for task ${payload.taskId}`);
+            if (payload.taskId && payload.graph) {
+              setTaskGraph(payload.taskId, payload.graph);
+            }
+            break;
+          }
+
+          case 'agent_memory_update': {
+            const payload = message.payload;
+            console.log(`[WebSocket] Received agent_memory_update for agent ${payload.agentId}`);
+            if (payload.agentId && payload.memories && payload.stats) {
+              setAgentMemory(payload.agentId, payload.memories, payload.stats);
+            }
+            break;
+          }
+
           default:
             console.log('[WebSocket] Unknown message type:', message.type);
         }
@@ -261,16 +311,38 @@ export function useWebSocket({
         console.error('[WebSocket] Failed to parse message:', error);
       }
     },
-    [addAgent, addTask, updateTask, addTicket, updateTicket, addApprovalRequest, addInteraction, updateInteraction, addTaskChatMessage, addAgentLog, addChatMessage]
+    [addAgent, addTask, updateTask, addTicket, updateTicket, addApprovalRequest, addInteraction, updateInteraction, addTaskChatMessage, addAgentLog, addChatMessage, setTaskGraph, setAgentMemory]
   );
+
+  // Show connection toast notification
+  const showConnectionToast = useCallback((type: 'success' | 'warning' | 'error' | 'info', message: string, persistent: boolean = false) => {
+    // Remove previous connection toast if exists
+    if (connectionToastId.current) {
+      removeToast(connectionToastId.current);
+    }
+
+    connectionToastId.current = crypto.randomUUID();
+    addToast({
+      type,
+      message,
+      duration: persistent ? 0 : 5000,
+    });
+
+    return connectionToastId.current;
+  }, [addToast, removeToast]);
 
   // Connection handler
   const connect = useCallback(() => {
     const currentAttempts = useWebSocketStore.getState().reconnectAttempts;
     if (currentAttempts >= maxReconnectAttempts) {
       console.error('[WebSocket] Max reconnect attempts reached');
+      setConnectionState('disconnected');
+      setLastError('Maximum reconnection attempts reached. Please refresh the page or click reconnect.');
+      showConnectionToast('error', 'Connection failed. Click to reconnect.', true);
       return;
     }
+
+    setConnectionState(currentAttempts > 0 ? 'reconnecting' : 'connecting');
 
     try {
       const ws = new WebSocket(url);
@@ -280,6 +352,10 @@ export function useWebSocket({
         setConnected(true);
         setWebSocket(ws);
         resetReconnectAttempts();
+        setLastError(null);
+
+        // Show success toast
+        showConnectionToast('success', 'Connected to server');
 
         // Send cursor for event replay on reconnection
         if (lastEventTimestampRef.current) {
@@ -289,6 +365,11 @@ export function useWebSocket({
             payload: { since: lastEventTimestampRef.current }
           }));
         }
+
+        // Process any pending messages that were queued while offline
+        setTimeout(() => {
+          processPendingMessages();
+        }, 100);
 
         // Clear reconnect timeout
         if (reconnectTimeoutRef.current) {
@@ -302,37 +383,55 @@ export function useWebSocket({
       ws.onerror = (error) => {
         console.error('[WebSocket] Error:', error);
         setConnected(false);
+        setLastError('WebSocket connection error');
       };
 
       ws.onclose = (event) => {
         console.log('[WebSocket] Connection closed', event.code, event.reason);
         setConnected(false);
         setWebSocket(null);
+        setLastDisconnectedAt(new Date());
 
         // 컴포넌트 언마운트 시 재연결하지 않음 (reason이 'Component unmounting'인 경우)
         if (event.reason === 'Component unmounting') {
           console.log('[WebSocket] Normal closure, not reconnecting');
+          setConnectionState('disconnected');
           return;
         }
 
-        // 서버에서 종료된 경우나 연결이 끊어진 경우 재연결 시도
-        console.log(`[WebSocket] Attempting to reconnect in ${reconnectInterval}ms...`);
+        // Get backoff delay using exponential backoff
+        const delay = getBackoffDelay();
+        const nextAttempt = useWebSocketStore.getState().reconnectAttempts + 1;
+
+        // Show reconnecting toast
+        showConnectionToast('warning', `Reconnecting (${nextAttempt}/${maxReconnectAttempts})...`);
+
+        console.log(`[WebSocket] Attempting to reconnect in ${delay}ms (attempt ${nextAttempt}/${maxReconnectAttempts})...`);
+        setConnectionState('reconnecting');
+
         reconnectTimeoutRef.current = setTimeout(() => {
           incrementReconnectAttempts();
           connect();
-        }, reconnectInterval);
+        }, delay);
       };
     } catch (error) {
       console.error('[WebSocket] Connection failed:', error);
       setConnected(false);
+      setLastError(error instanceof Error ? error.message : 'Connection failed');
 
-      // Schedule reconnect
+      // Get backoff delay
+      const delay = getBackoffDelay();
+      const nextAttempt = useWebSocketStore.getState().reconnectAttempts + 1;
+
+      showConnectionToast('warning', `Connection failed. Retrying (${nextAttempt}/${maxReconnectAttempts})...`);
+
+      // Schedule reconnect with exponential backoff
       reconnectTimeoutRef.current = setTimeout(() => {
         incrementReconnectAttempts();
         connect();
-      }, reconnectInterval);
+      }, delay);
     }
-  }, [url, handleMessage, setConnected, setWebSocket, resetReconnectAttempts, incrementReconnectAttempts, maxReconnectAttempts, reconnectInterval]);
+  }, [url, handleMessage, setConnected, setConnectionState, setWebSocket, resetReconnectAttempts, incrementReconnectAttempts, setLastError, setLastDisconnectedAt, processPendingMessages, getBackoffDelay, maxReconnectAttempts, showConnectionToast]);
 
   // Initialize connection
   useEffect(() => {

@@ -26,20 +26,106 @@ class LLMClient:
     """
     _instance: Optional['LLMClient'] = None
     _session: Optional[aiohttp.ClientSession] = None
-    
+    _initialized: bool = False
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
-    
+
     def __init__(self):
+        # Singleton 재초기화 방지
+        if LLMClient._initialized:
+            return
+        LLMClient._initialized = True
+
         self.api_url = os.getenv("LLM_API_URL", "https://api.platform.a15t.com/v1/chat/completions")
         self.api_key = os.getenv("LLM_API_KEY", "")
         self.model = os.getenv("LLM_MODEL", "azure/openai/gpt-4o")
+        self.default_temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+        self.default_max_tokens = int(os.getenv("LLM_MAX_TOKENS", "4096"))
         self.timeout = aiohttp.ClientTimeout(total=60, connect=10)
         self.max_retries = 3
         self.retry_delay = 1.0
-    
+
+        # 초기 설정 출력
+        self._print_config()
+
+    def _print_config(self):
+        """현재 설정 출력"""
+        print(f"[LLMClient] API URL: {self.api_url}")
+        print(f"[LLMClient] API Key: {'✅ 설정됨' if self.api_key else '❌ 미설정'}")
+        print(f"[LLMClient] Model: {self.model}")
+        print(f"[LLMClient] Temperature: {self.default_temperature}")
+        print(f"[LLMClient] Max Tokens: {self.default_max_tokens}")
+
+    def update_config(
+        self,
+        provider: str = None,
+        model: str = None,
+        api_key: str = None,
+        base_url: str = None,
+        temperature: float = None,
+        max_tokens: int = None
+    ) -> bool:
+        """
+        LLM 설정 업데이트 (UI에서 호출)
+
+        Returns:
+            bool: 변경이 있었으면 True
+        """
+        updated = []
+
+        # Base URL 업데이트
+        if base_url is not None and base_url.strip():
+            base_url = base_url.strip()
+            # /chat/completions 엔드포인트 정규화
+            if not base_url.endswith('/chat/completions'):
+                if base_url.endswith('/'):
+                    base_url = base_url + 'chat/completions'
+                elif base_url.endswith('/v1'):
+                    base_url = base_url + '/chat/completions'
+                elif '/v1' in base_url:
+                    base_url = base_url.rstrip('/') + '/chat/completions'
+                else:
+                    base_url = base_url.rstrip('/') + '/v1/chat/completions'
+
+            if base_url != self.api_url:
+                self.api_url = base_url
+                updated.append(f"api_url={base_url}")
+
+        # API Key 업데이트
+        if api_key is not None and api_key != self.api_key:
+            self.api_key = api_key
+            updated.append("api_key=***")
+
+        # Model 업데이트
+        if model is not None and model != self.model:
+            # provider/model 형식 지원
+            if '/' in model:
+                self.model = model
+            elif provider:
+                self.model = f"{provider}/{model}"
+            else:
+                self.model = model
+            updated.append(f"model={self.model}")
+
+        # Temperature 업데이트
+        if temperature is not None and temperature != self.default_temperature:
+            self.default_temperature = float(temperature)
+            updated.append(f"temperature={self.default_temperature}")
+
+        # Max Tokens 업데이트
+        if max_tokens is not None and max_tokens != self.default_max_tokens:
+            self.default_max_tokens = int(max_tokens)
+            updated.append(f"max_tokens={self.default_max_tokens}")
+
+        if updated:
+            print(f"[LLMClient] 설정 업데이트: {', '.join(updated)}")
+            self._print_config()
+
+        return len(updated) > 0
+
     async def _get_session(self) -> aiohttp.ClientSession:
         """세션 재사용 (Connection pooling)"""
         if self._session is None or self._session.closed:
@@ -49,34 +135,61 @@ class LLMClient:
                 timeout=self.timeout
             )
         return self._session
-    
+
     async def close(self):
         """세션 종료"""
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
-    
+
+    def _is_fixed_temperature_model(self) -> bool:
+        """temperature=1만 지원하는 모델인지 확인"""
+        model_lower = self.model.lower()
+        # o1, o3 reasoning 모델 및 일부 특수 모델은 temperature=1만 지원
+        fixed_temp_patterns = [
+            'o1', 'o3', 'o1-', 'o3-', '/o1', '/o3',
+            'gpt-5', 'gpt5',  # GPT-5 계열
+        ]
+        return any(pattern in model_lower for pattern in fixed_temp_patterns)
+
     async def call(
         self,
         messages: List[Dict[str, str]],
-        max_tokens: int = 1000,
-        temperature: float = 0.7,
+        max_tokens: int = None,
+        temperature: float = None,
         json_mode: bool = False
     ) -> str:
         """
         LLM API 호출 with retry & timeout
+
+        Args:
+            messages: 대화 메시지 리스트
+            max_tokens: 최대 토큰 수 (None이면 인스턴스 기본값 사용)
+            temperature: 온도 (None이면 인스턴스 기본값 사용)
+            json_mode: JSON 응답 모드
         """
+        # 인스턴스 기본값 사용
+        if max_tokens is None:
+            max_tokens = self.default_max_tokens
+        if temperature is None:
+            temperature = self.default_temperature
+
+        # 일부 모델은 temperature=1만 지원
+        if self._is_fixed_temperature_model() and temperature != 1.0:
+            print(f"[LLM] Fixed-temperature model detected ({self.model}), forcing temperature=1.0")
+            temperature = 1.0
+
         if not self.api_key:
             print("[LLM] Warning: LLM_API_KEY not set")
             return '{"error": "LLM API 키가 설정되지 않았습니다."}'
-        
+
         session = await self._get_session()
-        
+
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}"
         }
-        
+
         payload = {
             "model": self.model,
             "messages": messages,

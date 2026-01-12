@@ -1,8 +1,19 @@
 from .base_agent import BaseAgent
 from .generic_agent import GenericAgent
+from .task_processor_agent import TaskProcessorAgent
 from .agent_registry import AgentRegistry, agent_registry
 from .thinking_mode_state_machine import ThinkingModeStateMachine
 from .planner_agent import PlannerAgent, planner_agent, PlannerContext, PlannerResult
+from .enhanced_planner_agent import (
+    EnhancedPlannerAgent,
+    enhanced_planner_agent,
+    EnhancedPlannerContext,
+    EnhancedPlannerResult,
+)
+
+# MCP Agents (Background Workers)
+from .notion_mcp_agent import NotionMCPAgent, notion_mcp_agent
+from .slack_mcp_agent import SlackMCPAgent, slack_mcp_agent
 
 # ConversationState: Domain-agnostic state container
 from .conversation_state import ConversationStateV3
@@ -56,6 +67,7 @@ __all__ = [
     # Base agents
     "BaseAgent",
     "GenericAgent",
+    "TaskProcessorAgent",
     "AgentRegistry",
     "agent_registry",
     "ThinkingModeStateMachine",
@@ -63,6 +75,16 @@ __all__ = [
     "planner_agent",
     "PlannerContext",
     "PlannerResult",
+    "EnhancedPlannerAgent",
+    "enhanced_planner_agent",
+    "EnhancedPlannerContext",
+    "EnhancedPlannerResult",
+
+    # MCP Agents (Background Workers)
+    "NotionMCPAgent",
+    "notion_mcp_agent",
+    "SlackMCPAgent",
+    "slack_mcp_agent",
 
     # ConversationState: Domain-agnostic state container
     "ConversationStateV3",

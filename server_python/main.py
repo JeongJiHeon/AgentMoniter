@@ -39,6 +39,9 @@ from agents.orchestration import (
     orchestration_engine
 )
 from agents.dynamic_orchestration import dynamic_orchestration
+from agents.notion_mcp_agent import notion_mcp_agent
+from agents.slack_mcp_agent import slack_mcp_agent
+from agents.task_processor_agent import TaskProcessorAgent
 from services.slack_webhook import SlackWebhookService
 from services.redis_service import redis_service
 from services.event_store import event_store
@@ -668,221 +671,8 @@ async def main():
     if saved_agents:
         print(f"[Server] Found {len(saved_agents)} saved agents, restoring...")
         
-        # TaskProcessorAgent 클래스 정의 (나중에 재사용)
-        from agents.base_agent import BaseAgent
-        from agents.types import AgentInput, AgentOutput
-        from models.ticket import CreateTicketInput, TicketOption
-        from uuid import uuid4
-        from typing import Dict, Any
-        
-        class TaskProcessorAgent(BaseAgent):
-            """Task 처리용 Agent - BaseAgent를 상속받아 구현"""
-            
-            def __init__(self, config: AgentConfig, agent_id: str = None):
-                super().__init__(config)
-                if agent_id:
-                    self._id = agent_id
-                    self._state.id = agent_id
+        # TaskProcessorAgent는 agents.task_processor_agent에서 import됨
 
-            async def explore(self, input: AgentInput) -> Dict[str, Any]:
-                self.log("info", f"Exploring task: {input.metadata.get('title', 'Task')}")
-                return {
-                    "should_proceed": True,
-                    "data": {
-                        "task_id": input.metadata.get('task_id'),
-                        "title": input.metadata.get('title'),
-                        "content": input.content,
-                        "priority": input.metadata.get('priority', 'medium')
-                    }
-                }
-
-            async def structure(self, data: Any) -> Any:
-                self.log("info", "Structuring task into tickets")
-                return {
-                    "tickets": [{
-                        "purpose": f"Process: {data.get('title', 'Task')}",
-                        "content": data.get('content', ''),
-                        "priority": data.get('priority', 'medium')
-                    }]
-                }
-
-            async def validate(self, data: Any) -> Dict[str, Any]:
-                self.log("info", "Validating structured data")
-                return {
-                    "is_valid": True,
-                    "data": data,
-                    "errors": []
-                }
-
-            async def summarize(self, data: Any) -> AgentOutput:
-                self.log("info", "Summarizing and creating output")
-                tickets = []
-                approvals = []
-                
-                for ticket_data in data.get("tickets", []):
-                    # context를 JSON 문자열로 변환
-                    context_dict = {
-                        "what": ticket_data.get("purpose"),
-                        "why": "User requested task execution",
-                        "when": datetime.now().isoformat(),
-                        "where": "Agent Monitor System",
-                        "who": self.name,
-                        "how": "Automated processing"
-                    }
-                    
-                    ticket_input = CreateTicketInput(
-                        agentId=self.id,
-                        purpose=ticket_data.get("purpose", "Process task"),
-                        content=ticket_data.get("content", ""),
-                        context=json.dumps(context_dict),
-                        decisionRequired="Should I proceed with this task?",
-                        options=[
-                            TicketOption(
-                                id="approve",
-                                label="Approve and Execute",
-                                description="Proceed with task execution",
-                                isRecommended=True
-                            ),
-                            TicketOption(
-                                id="reject",
-                                label="Reject",
-                                description="Cancel task execution",
-                                isRecommended=False
-                            )
-                        ],
-                        executionPlan="1. Analyze task requirements\n2. Execute task steps\n3. Report results",
-                        priority=ticket_data.get("priority", "medium")
-                    )
-                    tickets.append(ticket_input)
-                    
-                    approval_dict = {
-                        "id": str(uuid4()),
-                        "ticketId": "",
-                        "agentId": self.id,
-                        "type": "proceed",
-                        "message": f"Approve task execution: {ticket_data.get('purpose')}?",
-                        "context": ticket_data.get("content", ""),
-                        "options": [
-                            {"id": "approve", "label": "Approve and Execute", "description": "Proceed with task execution", "isRecommended": True},
-                            {"id": "reject", "label": "Reject", "description": "Cancel task execution", "isRecommended": False}
-                        ],
-                        "status": "pending",
-                        "priority": 1,
-                        "createdAt": datetime.now().isoformat()
-                    }
-                    approvals.append(approval_dict)
-                
-                return AgentOutput(
-                    tickets=tickets,
-                    approval_requests=approvals,
-                    logs=[{"level": "info", "message": f"Created {len(tickets)} tickets"}]
-                )
-            
-            async def on_approved(self, approval):
-                """승인 후 실제 작업 수행"""
-                self.log("info", f"Approval received, executing task for ticket {approval.ticketId}")
-                
-                # 승인된 작업 실행
-                # TODO: 실제 작업 로직 구현 (예: LLM 호출, API 호출 등)
-                task_content = approval.context or "Task"
-                result_message = f"작업이 승인되어 처리되었습니다. (Ticket: {approval.ticketId})"
-                
-                # 결과를 WebSocket으로 브로드캐스트 (task_interaction 타입으로)
-                # Approval 응답은 System Notification으로 전송 (Task Chat 혼동 방지)
-                try:
-                    if ws_server:
-                        ws_server.broadcast_notification(
-                            f"Ticket approved: {result_message[:100]}",
-                            "success"
-                        )
-                        # Agent Activity 로그에도 기록
-                        ws_server.broadcast_agent_log(
-                            agent_id=self.id,
-                            agent_name=self.name,
-                            log_type="info",
-                            message=f"Ticket 승인됨: {approval.ticketId}",
-                            details=f"처리 결과:\n{result_message}"
-                        )
-                        print(f"[Server] Approval result broadcasted as notification and logged")
-                except (NameError, Exception) as e:
-                    print(f"[Server] ERROR broadcasting approval notification: {e}")
-                    import traceback
-                    traceback.print_exc()
-                
-                # Agent 상태 리셋: 작업 완료 후 IDLE 상태로 변경
-                # 주의: 작업이 완료되어도 다른 작업이 대기 중일 수 있으므로
-                # 즉시 IDLE로 변경하지 않고, 다음 작업이 없을 때만 IDLE로 변경
-                from models.agent import AgentStatus, ThinkingMode
-                state = self.get_state()
-                
-                # 현재 작업 완료 처리
-                state.currentTaskId = None
-                state.currentTaskDescription = None
-                state.thinkingMode = ThinkingMode.IDLE
-                
-                # 다른 대기 중인 작업이 있는지 확인
-                # TODO: 대기 중인 작업이 있으면 ACTIVE 유지, 없으면 IDLE로 변경
-                # 현재는 작업 완료 후 IDLE로 변경하지 않고 ACTIVE 유지
-                # (다음 작업이 바로 할당될 수 있으므로)
-                # state.status = AgentStatus.IDLE  # 주석 처리: 작업 완료 후에도 ACTIVE 유지
-                
-                self._emit_state_change()
-                
-                # WebSocket으로 Agent 상태 업데이트 브로드캐스트
-                try:
-                    if ws_server:
-                        ws_server.broadcast_agent_update(state)
-                except NameError:
-                    pass
-                
-                self.log("info", f"Task execution completed for ticket {approval.ticketId}, agent status maintained")
-            
-            async def on_rejected(self, approval):
-                """거부 처리"""
-                self.log("info", f"Task rejected for ticket {approval.ticketId}")
-                
-                # Rejection 응답도 System Notification으로 전송
-                try:
-                    if ws_server:
-                        ws_server.broadcast_notification(
-                            f"Ticket rejected: {approval.ticketId} 실행이 취소되었습니다.",
-                            "warning"
-                        )
-                        # Agent Activity 로그에도 기록
-                        ws_server.broadcast_agent_log(
-                            agent_id=self.id,
-                            agent_name=self.name,
-                            log_type="warning",
-                            message=f"Ticket 거부됨: {approval.ticketId}",
-                            details="사용자가 작업 실행을 거부했습니다."
-                        )
-                        print(f"[Server] Rejection broadcasted as notification and logged")
-                except (NameError, Exception) as e:
-                    print(f"[Server] ERROR broadcasting rejection notification: {e}")
-                    import traceback
-                    traceback.print_exc()
-                
-                # Agent 상태 리셋: 거부 후에도 ACTIVE 유지 (다음 작업 대기)
-                try:
-                    from models.agent import AgentStatus, ThinkingMode
-                    state = self.get_state()
-                    state.currentTaskId = None
-                    state.currentTaskDescription = None
-                    state.thinkingMode = ThinkingMode.IDLE
-                    # state.status = AgentStatus.IDLE  # 주석 처리: 거부 후에도 ACTIVE 유지
-                    self._emit_state_change()
-                    
-                    # WebSocket으로 Agent 상태 업데이트 브로드캐스트
-                    try:
-                        if ws_server:
-                            ws_server.broadcast_agent_update(state)
-                    except (NameError, Exception) as e:
-                        print(f"[Server] ERROR broadcasting agent update (reject): {e}")
-                except Exception as e:
-                    print(f"[Server] ERROR resetting agent state (reject): {e}")
-                    import traceback
-                    traceback.print_exc()
-        
         # 저장된 Agent 복원
         restored_count = 0
         for agent_data in saved_agents:
@@ -979,6 +769,83 @@ async def main():
     
     status = mcp_registry.get_status()
     print(f"  - Registered: {status['total']} services")
+    
+    # 1.5. MCP Background Agents 등록
+    print("\n[1.5/4] Registering MCP Background Agents...")
+    
+    # Notion MCP Agent 등록
+    try:
+        notion_api_key = os.getenv("NOTION_API_KEY", "demo-key")
+        if notion_api_key and notion_api_key != "demo-key":
+            notion_mcp_agent.configure(notion_api_key)
+            await notion_mcp_agent.connect()
+        agent_registry.register_agent(notion_mcp_agent)
+        
+        # Agent 초기화 및 시작
+        from agents.types import AgentExecutionContext
+        from models.ontology import OntologyContext
+        
+        ontology_context = OntologyContext(
+            activePreferences=[],
+            activeTaboos=[],
+            activeApprovalRules=[],
+            matchedFailurePatterns=[],
+            appliedConstraints=[]
+        )
+        
+        context = AgentExecutionContext(
+            agent_id=notion_mcp_agent.id,
+            ontology_context=ontology_context,
+            current_ticket=None,
+            previous_decisions=[]
+        )
+        
+        await notion_mcp_agent.initialize(context)
+        await notion_mcp_agent.start()
+        print(f"  - Registered: {notion_mcp_agent.name} ({notion_mcp_agent.id})")
+    except Exception as e:
+        print(f"  - Failed to register Notion MCP Agent: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # Slack MCP Agent 등록
+    try:
+        slack_bot_token = os.getenv("SLACK_BOT_TOKEN", "")
+        slack_webhook_url = os.getenv("SLACK_WEBHOOK_URL", "")
+        if slack_bot_token or slack_webhook_url:
+            slack_mcp_agent.configure(
+                bot_token=slack_bot_token if slack_bot_token else None,
+                webhook_url=slack_webhook_url if slack_webhook_url else None
+            )
+            await slack_mcp_agent.connect()
+        agent_registry.register_agent(slack_mcp_agent)
+        
+        # Agent 초기화 및 시작
+        from agents.types import AgentExecutionContext
+        from models.ontology import OntologyContext
+        
+        ontology_context = OntologyContext(
+            activePreferences=[],
+            activeTaboos=[],
+            activeApprovalRules=[],
+            matchedFailurePatterns=[],
+            appliedConstraints=[]
+        )
+        
+        context = AgentExecutionContext(
+            agent_id=slack_mcp_agent.id,
+            ontology_context=ontology_context,
+            current_ticket=None,
+            previous_decisions=[]
+        )
+        
+        await slack_mcp_agent.initialize(context)
+        await slack_mcp_agent.start()
+        print(f"  - Registered: {slack_mcp_agent.name} ({slack_mcp_agent.id})")
+    except Exception as e:
+        print(f"  - Failed to register Slack MCP Agent: {e}")
+        import traceback
+        traceback.print_exc()
     
     # 2. WebSocket 서버 시작
     print("\n[2/4] Starting WebSocket Server...")
@@ -1209,226 +1076,7 @@ async def main():
                     custom_config=custom_config
                 )
 
-                # BaseAgent를 상속받는 간단한 TaskProcessorAgent 생성
-                from agents.base_agent import BaseAgent
-                from agents.types import AgentInput, AgentOutput
-                from models.ticket import CreateTicketInput, TicketOption
-                from uuid import uuid4
-                from typing import Dict, Any
-
-                class TaskProcessorAgent(BaseAgent):
-                    """Task 처리용 Agent - BaseAgent를 상속받아 구현"""
-                    
-                    def __init__(self, config: AgentConfig, agent_id: str = None):
-                        # BaseAgent 초기화
-                        super().__init__(config)
-                        # 지정된 ID가 있으면 덮어쓰기
-                        if agent_id:
-                            self._id = agent_id
-                            self._state.id = agent_id
-
-                    async def explore(self, input: AgentInput) -> Dict[str, Any]:
-                        """탐색 단계"""
-                        self.log("info", f"Exploring task: {input.metadata.get('title', 'Task')}")
-                        return {
-                            "should_proceed": True,
-                            "data": {
-                                "task_id": input.metadata.get('task_id'),
-                                "title": input.metadata.get('title'),
-                                "content": input.content,
-                                "priority": input.metadata.get('priority', 'medium')
-                            }
-                        }
-
-                    async def structure(self, data: Any) -> Any:
-                        """구조화 단계"""
-                        self.log("info", "Structuring task into tickets")
-                        return {
-                            "tickets": [{
-                                "purpose": f"Process: {data.get('title', 'Task')}",
-                                "content": data.get('content', ''),
-                                "priority": data.get('priority', 'medium')
-                            }]
-                        }
-
-                    async def validate(self, data: Any) -> Dict[str, Any]:
-                        """검증 단계"""
-                        self.log("info", "Validating structured data")
-                        return {
-                            "is_valid": True,
-                            "data": data,
-                            "errors": []
-                        }
-
-                    async def on_approved(self, approval):
-                        """승인 후 실제 작업 수행"""
-                        self.log("info", f"Approval received, executing task for ticket {approval.ticketId}")
-                        
-                        # 승인된 작업 실행
-                        # TODO: 실제 작업 로직 구현 (예: LLM 호출, API 호출 등)
-                        task_content = approval.context or "Task"
-                        result_message = f"작업이 승인되어 처리되었습니다. (Ticket: {approval.ticketId})"
-                        
-                        # 결과를 WebSocket으로 브로드캐스트 (챗봇 메시지로)
-                        # Approval 응답은 System Notification으로 전송
-                        try:
-                            if ws_server:
-                                ws_server.broadcast_notification(
-                                    f"Agent created and approved: {result_message[:100]}",
-                                    "success"
-                                )
-                                # Agent Activity 로그에도 기록
-                                ws_server.broadcast_agent_log(
-                                    agent_id=self.id,
-                                    agent_name=self.name,
-                                    log_type="info",
-                                    message=f"Agent 생성 승인됨: {approval.ticketId}",
-                                    details=f"처리 결과:\n{result_message}"
-                                )
-                                print(f"[Server] Agent creation approval broadcasted as notification and logged")
-                        except (NameError, Exception) as e:
-                            print(f"[Server] ERROR broadcasting agent creation notification: {e}")
-                            import traceback
-                            traceback.print_exc()
-                        
-                        # Agent 상태 리셋: 작업 완료 후에도 ACTIVE 유지 (다음 작업 대기)
-                        try:
-                            from models.agent import AgentStatus, ThinkingMode
-                            state = self.get_state()
-                            state.currentTaskId = None
-                            state.currentTaskDescription = None
-                            state.thinkingMode = ThinkingMode.IDLE
-                            # state.status = AgentStatus.IDLE  # 주석 처리: 작업 완료 후에도 ACTIVE 유지
-                            self._emit_state_change()
-                            
-                            # WebSocket으로 Agent 상태 업데이트 브로드캐스트
-                            try:
-                                if ws_server:
-                                    ws_server.broadcast_agent_update(state)
-                            except (NameError, Exception) as e:
-                                print(f"[Server] ERROR broadcasting agent update (CREATE_AGENT): {e}")
-                        except Exception as e:
-                            print(f"[Server] ERROR resetting agent state (CREATE_AGENT): {e}")
-                            import traceback
-                            traceback.print_exc()
-                        
-                        self.log("info", f"Task execution completed for ticket {approval.ticketId}, agent status maintained")
-                    
-                    async def on_rejected(self, approval):
-                        """거부 처리"""
-                        self.log("info", f"Task rejected for ticket {approval.ticketId}")
-                        
-                        # Rejection 응답도 System Notification으로 전송
-                        try:
-                            if ws_server:
-                                ws_server.broadcast_notification(
-                                    f"Agent creation rejected: Ticket {approval.ticketId} 실행이 취소되었습니다.",
-                                    "warning"
-                                )
-                                # Agent Activity 로그에도 기록
-                                ws_server.broadcast_agent_log(
-                                    agent_id=self.id,
-                                    agent_name=self.name,
-                                    log_type="warning",
-                                    message=f"Agent 생성 거부됨: {approval.ticketId}",
-                                    details="사용자가 Agent 생성을 거부했습니다."
-                                )
-                                print(f"[Server] Agent creation rejection broadcasted as notification and logged")
-                        except (NameError, Exception) as e:
-                            print(f"[Server] ERROR broadcasting rejection notification: {e}")
-                            import traceback
-                            traceback.print_exc()
-                        
-                        # Agent 상태 리셋: 거부 후에도 ACTIVE 유지 (다음 작업 대기)
-                        try:
-                            from models.agent import AgentStatus, ThinkingMode
-                            state = self.get_state()
-                            state.currentTaskId = None
-                            state.currentTaskDescription = None
-                            state.thinkingMode = ThinkingMode.IDLE
-                            # state.status = AgentStatus.IDLE  # 주석 처리: 거부 후에도 ACTIVE 유지
-                            self._emit_state_change()
-                            
-                            # WebSocket으로 Agent 상태 업데이트 브로드캐스트
-                            try:
-                                if ws_server:
-                                    ws_server.broadcast_agent_update(state)
-                            except (NameError, Exception) as e:
-                                print(f"[Server] ERROR broadcasting agent update (CREATE_AGENT reject): {e}")
-                        except Exception as e:
-                            print(f"[Server] ERROR resetting agent state (CREATE_AGENT reject): {e}")
-                            import traceback
-                            traceback.print_exc()
-                    
-                    async def summarize(self, data: Any) -> AgentOutput:
-                        """요약 단계"""
-                        self.log("info", "Summarizing and creating output")
-                        
-                        tickets = []
-                        approvals = []
-                        
-                        for ticket_data in data.get("tickets", []):
-                            # context를 JSON 문자열로 변환
-                            context_dict = {
-                                "what": ticket_data.get("purpose"),
-                                "why": "User requested task execution",
-                                "when": datetime.now().isoformat(),
-                                "where": "Agent Monitor System",
-                                "who": self.name,
-                                "how": "Automated processing"
-                            }
-                            
-                            ticket_input = CreateTicketInput(
-                                agentId=self.id,
-                                purpose=ticket_data.get("purpose", "Process task"),
-                                content=ticket_data.get("content", ""),
-                                context=json.dumps(context_dict),
-                                decisionRequired="Should I proceed with this task?",
-                                options=[
-                                    TicketOption(
-                                        id="approve",
-                                        label="Approve and Execute",
-                                        description="Proceed with task execution",
-                                        isRecommended=True
-                                    ),
-                                    TicketOption(
-                                        id="reject",
-                                        label="Reject",
-                                        description="Cancel task execution",
-                                        isRecommended=False
-                                    )
-                                ],
-                                executionPlan="1. Analyze task requirements\n2. Execute task steps\n3. Report results",
-                                priority=ticket_data.get("priority", "medium")
-                            )
-                            tickets.append(ticket_input)
-                            
-                            # Approval request 생성
-                            # 옵션이 있는 티켓이므로 select_option 타입으로 생성
-                            # ticketId를 미리 생성하여 approval과 ticket이 같은 ID를 공유하도록 함
-                            shared_ticket_id = str(uuid4())
-                            approval_dict = {
-                                "id": str(uuid4()),
-                                "ticketId": shared_ticket_id,  # Ticket ID를 미리 생성하여 공유
-                                "agentId": self.id,
-                                "type": "select_option",  # 옵션이 있으므로 select_option 타입
-                                "message": f"Approve task execution: {ticket_data.get('purpose')}?",
-                                "context": ticket_data.get("content", ""),
-                                "options": [
-                                    {"id": "approve", "label": "Approve and Execute", "description": "Proceed with task execution", "isRecommended": True},
-                                    {"id": "reject", "label": "Reject", "description": "Cancel task execution", "isRecommended": False}
-                                ],
-                                "status": "pending",
-                                "priority": 1,
-                                "createdAt": datetime.now().isoformat()
-                            }
-                            approvals.append(approval_dict)
-                        
-                        return AgentOutput(
-                            tickets=tickets,
-                            approval_requests=approvals,
-                            logs=[{"level": "info", "message": f"Created {len(tickets)} tickets"}]
-                        )
+                # TaskProcessorAgent는 agents.task_processor_agent에서 import됨
 
                 # Agent 생성
                 agent = TaskProcessorAgent(config, agent_id)
@@ -2060,9 +1708,9 @@ async def main():
             max_tokens = payload.get('maxTokens')
             
             print(f"[Server] Received LLM config update: provider={provider}, model={model}, baseUrl={base_url}")
-            
-            # LLMClient 설정 업데이트
-            from agents.orchestration import LLMClient
+
+            # LLMClient 설정 업데이트 (models.orchestration의 Singleton 사용)
+            from models.orchestration import LLMClient
             llm_client = LLMClient()
             updated = llm_client.update_config(
                 provider=provider,
@@ -2164,6 +1812,15 @@ async def main():
     
     await ws_server.start()
     print(f"  - WebSocket server running on port {ws_port}")
+    
+    # MCP Agent 상태를 WebSocket으로 브로드캐스트
+    try:
+        if notion_mcp_agent:
+            ws_server.broadcast_agent_update(notion_mcp_agent.get_state())
+        if slack_mcp_agent:
+            ws_server.broadcast_agent_update(slack_mcp_agent.get_state())
+    except Exception as e:
+        print(f"  - Warning: Failed to broadcast MCP Agent states: {e}")
     
     # HTTP 서버 시작 (별도 태스크로 실행)
     http_port = int(os.getenv("HTTP_PORT", "8000"))

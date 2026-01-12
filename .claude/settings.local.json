@@ -8,7 +8,14 @@
       "Bash(docker-compose up:*)",
       "Bash(python3:*)",
       "Bash(find:*)",
-      "Bash(pkill:*)"
+      "Bash(pkill:*)",
+      "Bash(wc:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(python:*)",
+      "Bash(git checkout:*)",
+      "Skill(frontend-design)",
+      "Bash(lsof:*)",
+      "Bash(xargs kill:*)"
     ]
   }
 }

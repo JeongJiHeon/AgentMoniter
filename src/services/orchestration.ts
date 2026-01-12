@@ -87,12 +87,15 @@ ${JSON.stringify(agentSummary, null, 2)}
 
       const response = await callLLM(this.llmConfig, messages);
 
+      console.log('[Orchestration] LLM Response:', response);
+
       // JSON 추출
       let jsonText = '';
       const codeBlockMatch = response.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
       if (codeBlockMatch) {
         jsonText = codeBlockMatch[1].trim();
       } else {
+        // 코드 블록이 없으면 중괄호로 시작하는 JSON 찾기
         const jsonMatch = response.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
           jsonText = jsonMatch[0];
@@ -100,23 +103,75 @@ ${JSON.stringify(agentSummary, null, 2)}
       }
 
       if (!jsonText) {
-        console.error('[Orchestration] Failed to extract JSON from response');
+        console.error('[Orchestration] Failed to extract JSON from response. Full response:', response);
+        // JSON 추출 실패 시 폴백: 첫 번째 에이전트를 기본으로 선택
+        if (availableAgents.length > 0) {
+          console.log('[Orchestration] Fallback: Using first available agent');
+          return {
+            agents: [{
+              agentId: availableAgents[0].id,
+              agentName: availableAgents[0].name,
+              reason: 'LLM 응답 파싱 실패로 기본 에이전트 선택',
+              order: 1,
+            }],
+            needsUserInput: false,
+          };
+        }
         return { agents: [], needsUserInput: false };
       }
 
-      const result = JSON.parse(jsonText);
+      let result: any;
+      try {
+        result = JSON.parse(jsonText);
+      } catch (parseError) {
+        console.error('[Orchestration] JSON parse error:', parseError);
+        console.error('[Orchestration] JSON text:', jsonText);
+        // JSON 파싱 실패 시 폴백
+        if (availableAgents.length > 0) {
+          console.log('[Orchestration] Fallback: Using first available agent (JSON parse failed)');
+          return {
+            agents: [{
+              agentId: availableAgents[0].id,
+              agentName: availableAgents[0].name,
+              reason: 'JSON 파싱 실패로 기본 에이전트 선택',
+              order: 1,
+            }],
+            needsUserInput: false,
+          };
+        }
+        return { agents: [], needsUserInput: false };
+      }
 
       // 선택된 Agent들 검증
       const validAgents: SelectedAgent[] = [];
-      for (const item of result.agents || []) {
-        const agent = availableAgents.find(a => a.id === item.agentId);
+      const agentsArray = result.agents || [];
+      
+      if (!Array.isArray(agentsArray)) {
+        console.warn('[Orchestration] agents is not an array:', agentsArray);
+      }
+
+      for (const item of agentsArray) {
+        if (!item || typeof item !== 'object') {
+          console.warn('[Orchestration] Invalid agent item:', item);
+          continue;
+        }
+
+        const agentId = item.agentId || item.id;
+        if (!agentId) {
+          console.warn('[Orchestration] Agent item missing agentId:', item);
+          continue;
+        }
+
+        const agent = availableAgents.find(a => a.id === agentId);
         if (agent) {
           validAgents.push({
             agentId: agent.id,
             agentName: agent.name,
-            reason: item.reason || '',
-            order: item.order || validAgents.length + 1,
+            reason: item.reason || '선택됨',
+            order: typeof item.order === 'number' ? item.order : validAgents.length + 1,
           });
+        } else {
+          console.warn(`[Orchestration] Agent not found: ${agentId}`);
         }
       }
 
@@ -124,6 +179,21 @@ ${JSON.stringify(agentSummary, null, 2)}
       validAgents.sort((a, b) => a.order - b.order);
 
       console.log(`[Orchestration] Selected ${validAgents.length} agents:`, validAgents.map(a => a.agentName));
+
+      // 에이전트가 선택되지 않았고 사용 가능한 에이전트가 있는 경우 폴백
+      if (validAgents.length === 0 && availableAgents.length > 0) {
+        console.log('[Orchestration] No valid agents selected, using fallback');
+        return {
+          agents: [{
+            agentId: availableAgents[0].id,
+            agentName: availableAgents[0].name,
+            reason: '에이전트 선택 실패로 기본 에이전트 사용',
+            order: 1,
+          }],
+          needsUserInput: result.needsUserInput || false,
+          inputPrompt: result.inputPrompt,
+        };
+      }
       
       return {
         agents: validAgents,
@@ -132,6 +202,22 @@ ${JSON.stringify(agentSummary, null, 2)}
       };
     } catch (error) {
       console.error('[Orchestration] Error selecting agents:', error);
+      console.error('[Orchestration] Error details:', error instanceof Error ? error.stack : error);
+      
+      // 에러 발생 시 폴백: 첫 번째 에이전트를 기본으로 선택
+      if (availableAgents.length > 0) {
+        console.log('[Orchestration] Fallback: Using first available agent (error occurred)');
+        return {
+          agents: [{
+            agentId: availableAgents[0].id,
+            agentName: availableAgents[0].name,
+            reason: '에러 발생으로 기본 에이전트 선택',
+            order: 1,
+          }],
+          needsUserInput: false,
+        };
+      }
+      
       return { agents: [], needsUserInput: false };
     }
   }

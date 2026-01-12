@@ -8,3 +8,11 @@ python-multipart==0.0.12
 aiohttp==3.11.3
 redis==5.0.1
 
+# Enhanced Agent System Dependencies
+aiofiles==24.1.0
+tiktoken==0.8.0
+
+# PostgreSQL & Database
+sqlalchemy[asyncio]==2.0.25
+asyncpg==0.29.0
+alembic==1.13.1

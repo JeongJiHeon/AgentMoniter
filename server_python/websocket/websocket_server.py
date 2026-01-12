@@ -57,6 +57,7 @@ class AgentMonitorWebSocketServer:
         self.on_client_action: Optional[Callable[[str, WebSocketMessage], None]] = None
         self.event_store = event_store  # Use Redis event store for persistence
         self._recent_tasks: Dict[str, dict] = {}  # 최근 Task 저장소
+        self._task_graphs: Dict[str, dict] = {}  # Task graph 저장소 (task_id -> graph dict)
     
     async def start(self) -> None:
         """서버 시작"""
@@ -206,6 +207,16 @@ class AgentMonitorWebSocketServer:
                 await self._handle_request_task_events(client_id, message.payload)
                 return
 
+            # Task graph 요청 처리
+            if message.type == "request_task_graph":
+                await self._handle_request_task_graph(client_id, message.payload)
+                return
+
+            # Agent memory 요청 처리
+            if message.type == "request_agent_memory":
+                await self._handle_request_agent_memory(client_id, message.payload)
+                return
+
             # 클라이언트 -> 서버 메시지 처리
             if message.type in [
                 WebSocketMessageType.ASSIGN_TASK,
@@ -265,6 +276,114 @@ class AgentMonitorWebSocketServer:
                     "taskId": task_id,
                     "events": [],
                     "count": 0,
+                    "error": str(e)
+                }
+            ))
+
+    async def _handle_request_task_graph(self, client_id: str, payload: dict) -> None:
+        """Task graph 요청 처리"""
+        task_id = payload.get("taskId") or payload.get("task_id")
+        if not task_id:
+            print(f"[WebSocket] request_task_graph: No task_id provided")
+            return
+
+        try:
+            # 메모리에서 먼저 조회
+            graph_data = self.get_task_graph(task_id)
+            
+            # 메모리에 없으면 DB에서 조회
+            if not graph_data:
+                graph_data = await self.get_task_graph_from_db(task_id)
+            
+            print(f"[WebSocket] Requesting task graph for task {task_id}: {'found' if graph_data else 'not found'}")
+
+            await self._send_to_client(client_id, WebSocketMessage(
+                type="task_graph_update",
+                payload={
+                    "taskId": task_id,
+                    "graph": graph_data,
+                }
+            ))
+        except Exception as e:
+            print(f"[WebSocket] Error fetching task graph: {e}")
+            await self._send_to_client(client_id, WebSocketMessage(
+                type="task_graph_update",
+                payload={
+                    "taskId": task_id,
+                    "graph": None,
+                    "error": str(e)
+                }
+            ))
+
+    async def _handle_request_agent_memory(self, client_id: str, payload: dict) -> None:
+        """Agent memory 요청 처리"""
+        agent_id = payload.get("agentId") or payload.get("agent_id")
+        task_id = payload.get("taskId") or payload.get("task_id")  # Optional: task별 관련 메모리만
+        limit = payload.get("limit", 10)
+
+        if not agent_id:
+            print(f"[WebSocket] request_agent_memory: No agent_id provided")
+            return
+
+        try:
+            memories = []
+            memory_stats = {
+                "short_term": 0,
+                "long_term": 0,
+            }
+
+            # Enhanced Planner Agent의 memory를 조회
+            try:
+                from agents import enhanced_planner_agent
+                if hasattr(enhanced_planner_agent, 'memory') and enhanced_planner_agent.memory:
+                    # Task 관련 쿼리로 메모리 조회
+                    query = task_id if task_id else None
+                    recalled_memories = enhanced_planner_agent.memory.recall(
+                        query=query,
+                        limit=limit
+                    )
+                    
+                    # Memory 객체를 dict로 변환
+                    for mem in recalled_memories:
+                        memories.append({
+                            "id": mem.id,
+                            "type": mem.type.value if hasattr(mem.type, 'value') else str(mem.type),
+                            "content": mem.content,
+                            "importance": mem.importance,
+                            "confidence": mem.confidence,
+                            "tags": list(mem.tags) if mem.tags else [],
+                        })
+                    
+                    # Memory stats
+                    if hasattr(enhanced_planner_agent.memory, '_short_term'):
+                        memory_stats["short_term"] = len(enhanced_planner_agent.memory._short_term)
+                    if hasattr(enhanced_planner_agent.memory, '_long_term'):
+                        memory_stats["long_term"] = len(enhanced_planner_agent.memory._long_term)
+            except Exception as mem_error:
+                print(f"[WebSocket] Error accessing agent memory: {mem_error}")
+
+            print(f"[WebSocket] Requesting memory for agent {agent_id}: {len(memories)} memories found")
+
+            await self._send_to_client(client_id, WebSocketMessage(
+                type="agent_memory_update",
+                payload={
+                    "agentId": agent_id,
+                    "taskId": task_id,
+                    "memories": memories,
+                    "stats": memory_stats,
+                }
+            ))
+        except Exception as e:
+            print(f"[WebSocket] Error fetching agent memory: {e}")
+            import traceback
+            traceback.print_exc()
+            await self._send_to_client(client_id, WebSocketMessage(
+                type="agent_memory_update",
+                payload={
+                    "agentId": agent_id,
+                    "taskId": task_id,
+                    "memories": [],
+                    "stats": {"short_term": 0, "long_term": 0},
                     "error": str(e)
                 }
             ))
@@ -419,6 +538,63 @@ class AgentMonitorWebSocketServer:
         """완료된 Task 저장소에서 제거"""
         if task_id in self._recent_tasks:
             del self._recent_tasks[task_id]
+        if task_id in self._task_graphs:
+            del self._task_graphs[task_id]
+    
+    def save_task_graph(self, task_id: str, graph_data: dict) -> None:
+        """Task graph 저장 (메모리 + DB)"""
+        # 메모리에 저장 (빠른 접근을 위해)
+        self._task_graphs[task_id] = graph_data
+        print(f"[WebSocket] Saved task graph for task {task_id} (memory)")
+        
+        # DB에도 저장 (비동기로 실행)
+        asyncio.create_task(self._save_task_graph_to_db(task_id, graph_data))
+    
+    async def _save_task_graph_to_db(self, task_id: str, graph_data: dict) -> None:
+        """Task graph를 DB에 저장"""
+        try:
+            from database.connection import get_database
+            from database.repositories.task_repository import TaskRepository
+            from uuid import UUID
+            
+            db = get_database()
+            async with db.session() as session:
+                repo = TaskRepository(session)
+                task_uuid = UUID(task_id)
+                await repo.update(task_uuid, graph_data=graph_data)
+                print(f"[WebSocket] Saved task graph for task {task_id} (database)")
+        except Exception as e:
+            print(f"[WebSocket] Error saving task graph to DB: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def get_task_graph(self, task_id: str) -> Optional[dict]:
+        """Task graph 조회 (메모리 우선)"""
+        # 메모리에서 먼저 조회
+        return self._task_graphs.get(task_id)
+    
+    async def get_task_graph_from_db(self, task_id: str) -> Optional[dict]:
+        """Task graph를 DB에서 조회"""
+        try:
+            from database.connection import get_database
+            from database.repositories.task_repository import TaskRepository
+            from uuid import UUID
+            
+            db = get_database()
+            async with db.session() as session:
+                repo = TaskRepository(session)
+                task_uuid = UUID(task_id)
+                task = await repo.get_by_id(task_uuid)
+                if task and task.graph_data:
+                    # 메모리 캐시에도 저장
+                    self._task_graphs[task_id] = task.graph_data
+                    return task.graph_data
+            return None
+        except Exception as e:
+            print(f"[WebSocket] Error getting task graph from DB: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
     
     def broadcast_task_interaction(self, task_id: str, role: str, message: str, agent_id: str = None, agent_name: str = None) -> None:
         """Task 상호작용 메시지 브로드캐스트 (Event Store에 저장)"""
@@ -512,6 +688,32 @@ class AgentMonitorWebSocketServer:
         self._broadcast(WebSocketMessage(
             type="agent_summary",
             payload=summary
+        ))
+
+    def broadcast_task_graph(self, task_id: str, graph_data: dict) -> None:
+        """Task graph 브로드캐스트"""
+        print(f"[WebSocket] Broadcasting task_graph_update: taskId={task_id}")
+
+        self._broadcast(WebSocketMessage(
+            type=WebSocketMessageType.TASK_GRAPH_UPDATE,
+            payload={
+                "taskId": task_id,
+                "graph": graph_data,
+            }
+        ))
+
+    def broadcast_agent_memory(self, agent_id: str, memories: list, stats: dict, task_id: str = None) -> None:
+        """Agent memory 브로드캐스트"""
+        print(f"[WebSocket] Broadcasting agent_memory_update: agentId={agent_id}, memories={len(memories)}")
+
+        self._broadcast(WebSocketMessage(
+            type=WebSocketMessageType.AGENT_MEMORY_UPDATE,
+            payload={
+                "agentId": agent_id,
+                "taskId": task_id,
+                "memories": memories,
+                "stats": stats,
+            }
         ))
 
     # === 유틸리티 ===

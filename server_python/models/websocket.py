@@ -15,6 +15,8 @@ class WebSocketMessageType(str, Enum):
     AGENT_RESPONSE = "agent_response"
     TASK_INTERACTION = "task_interaction"
     CHAT_MESSAGE_RESPONSE = "chat_message_response"
+    TASK_GRAPH_UPDATE = "task_graph_update"
+    AGENT_MEMORY_UPDATE = "agent_memory_update"
 
     # Client -> Server
     ASSIGN_TASK = "assign_task"
@@ -29,4 +31,6 @@ class WebSocketMessageType(str, Enum):
     PAUSE_AGENT = "pause_agent"
     RESUME_AGENT = "resume_agent"
     UPDATE_LLM_CONFIG = "update_llm_config"  # LLM 설정 동기화
+    REQUEST_TASK_GRAPH = "request_task_graph"
+    REQUEST_AGENT_MEMORY = "request_agent_memory"
 

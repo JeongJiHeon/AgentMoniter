@@ -1,272 +1,420 @@
-import React from 'react';
-import type { Task, TaskStatus, TaskPriority } from '../../types/task';
-import type { Agent, TaskChatMessage } from '../../types';
-import { getStatusColor, getStatusLabel, getStatusIcon } from '../../types/agentResult';
-import { AssignAgentModal } from './AssignAgentModal';
-import { TaskChatDrawer } from './TaskChatDrawer';
+/**
+ * TaskCard - Terminal Elegance 디자인의 Task 카드
+ */
+
+import React from 'react'
+import type { Task, TaskStatus, TaskPriority } from '../../types/task'
+import type { Agent, TaskChatMessage } from '../../types'
+import { getStatusColor, getStatusLabel, getStatusIcon } from '../../types/agentResult'
+import { AssignAgentModal } from './AssignAgentModal'
+import { TaskChatDrawer } from './TaskChatDrawer'
+import { cn } from '@/lib/utils'
+import { Button } from '../ui/Button'
+import { X, MessageSquare, Zap, Square, Eye, UserPlus, Clock, CheckCircle2, XCircle, AlertCircle, Play } from 'lucide-react'
 
 interface TaskCardProps {
-  task: Task;
-  agents: Agent[];
-  onStatusChange: (id: string, status: TaskStatus) => void;
-  onUpdate: (id: string, updates: Partial<Task>) => void;
-  onDelete: (id: string) => void;
-  onAssignAgent?: (taskId: string, agentId: string) => void;
-  onViewDetail?: (taskId: string) => void;
-  autoAssignMode?: 'global' | 'manual';
-  taskChatMessages?: TaskChatMessage[];
-  onSendTaskMessage?: (taskId: string, message: string) => void;
+  task: Task
+  agents: Agent[]
+  onStatusChange: (id: string, status: TaskStatus) => void
+  onUpdate: (id: string, updates: Partial<Task>) => void
+  onDelete: (id: string) => void
+  onAssignAgent?: (taskId: string, agentId: string) => void
+  onViewDetail?: (taskId: string) => void
+  autoAssignMode?: 'global' | 'manual'
+  taskChatMessages?: TaskChatMessage[]
+  onSendTaskMessage?: (taskId: string, message: string) => void
 }
 
-const priorityColors: Record<TaskPriority, string> = {
-  low: 'bg-slate-600 text-slate-300',
-  medium: 'bg-blue-600 text-blue-100',
-  high: 'bg-orange-600 text-orange-100',
-  urgent: 'bg-red-600 text-red-100',
-};
+const priorityConfig: Record<TaskPriority, { label: string; color: string; bgColor: string; borderColor: string }> = {
+  low: {
+    label: 'Low',
+    color: 'text-[hsl(var(--muted-foreground))]',
+    bgColor: 'bg-[hsl(var(--muted))]',
+    borderColor: 'border-[hsl(var(--border))]',
+  },
+  medium: {
+    label: 'Medium',
+    color: 'text-[hsl(var(--info))]',
+    bgColor: 'bg-[hsl(var(--info))]/10',
+    borderColor: 'border-[hsl(var(--info))]/20',
+  },
+  high: {
+    label: 'High',
+    color: 'text-[hsl(var(--warning))]',
+    bgColor: 'bg-[hsl(var(--warning))]/10',
+    borderColor: 'border-[hsl(var(--warning))]/20',
+  },
+  urgent: {
+    label: 'Urgent',
+    color: 'text-[hsl(var(--destructive))]',
+    bgColor: 'bg-[hsl(var(--destructive))]/10',
+    borderColor: 'border-[hsl(var(--destructive))]/20',
+  },
+}
 
-const statusColors: Record<TaskStatus, string> = {
-  pending: 'border-slate-600',
-  in_progress: 'border-blue-500',
-  completed: 'border-green-500 opacity-60',
-  cancelled: 'border-slate-500 opacity-50',
-  failed: 'border-red-500 opacity-70',
-};
+const statusConfig: Record<TaskStatus, { icon: React.ReactNode; color: string; borderColor: string }> = {
+  pending: {
+    icon: <Clock className="w-3.5 h-3.5" />,
+    color: 'text-[hsl(var(--muted-foreground))]',
+    borderColor: 'border-l-[hsl(var(--muted-foreground))]',
+  },
+  in_progress: {
+    icon: <Play className="w-3.5 h-3.5" />,
+    color: 'text-[hsl(var(--info))]',
+    borderColor: 'border-l-[hsl(var(--info))]',
+  },
+  completed: {
+    icon: <CheckCircle2 className="w-3.5 h-3.5" />,
+    color: 'text-[hsl(var(--success))]',
+    borderColor: 'border-l-[hsl(var(--success))]',
+  },
+  cancelled: {
+    icon: <XCircle className="w-3.5 h-3.5" />,
+    color: 'text-[hsl(var(--muted-foreground))]',
+    borderColor: 'border-l-[hsl(var(--muted-foreground))]',
+  },
+  failed: {
+    icon: <AlertCircle className="w-3.5 h-3.5" />,
+    color: 'text-[hsl(var(--destructive))]',
+    borderColor: 'border-l-[hsl(var(--destructive))]',
+  },
+}
 
-// 상태에 따른 행동 유도 메시지
 const getActionMessage = (task: Task, assignedAgent?: Agent, allAgents?: Agent[]): string => {
-  if (task.status === 'completed') return 'Completed';
-  if (task.status === 'cancelled') return 'Cancelled';
-  if (task.status === 'failed') return 'Failed';
-  if (!task.assignedAgentId) return 'No agent assigned';
-  if (task.status === 'pending') return 'Waiting to start';
+  if (task.status === 'completed') return 'Completed'
+  if (task.status === 'cancelled') return 'Cancelled'
+  if (task.status === 'failed') return 'Failed'
+  if (!task.assignedAgentId) return 'No agent assigned'
+  if (task.status === 'pending') return 'Waiting to start'
   if (task.status === 'in_progress') {
-    if (assignedAgent?.thinkingMode === 'idle') return 'Agent idle';
-
-    // Orchestration Agent인 경우 sub agent 개수 표시
+    if (assignedAgent?.thinkingMode === 'idle') return 'Agent idle'
     if (assignedAgent?.role === 'orchestration' && assignedAgent.subAgents && assignedAgent.subAgents.length > 0) {
       const activeSubAgents = assignedAgent.subAgents.filter(subId =>
         allAgents?.find(a => a.id === subId && a.isActive)
-      ).length;
-      return `Running with ${activeSubAgents} agent${activeSubAgents !== 1 ? 's' : ''}`;
+      ).length
+      return `Running with ${activeSubAgents} agent${activeSubAgents !== 1 ? 's' : ''}`
     }
-
-    return 'Running';
+    return 'Running'
   }
-  return 'Unknown status';
-};
+  return 'Unknown status'
+}
 
-export function TaskCard({ task, agents, onStatusChange, onUpdate, onDelete, onAssignAgent, onViewDetail, autoAssignMode = 'manual', taskChatMessages = [], onSendTaskMessage }: TaskCardProps) {
-  const [showAssignModal, setShowAssignModal] = React.useState(false);
-  const [showChatDrawer, setShowChatDrawer] = React.useState(false);
-  const [userResponse, setUserResponse] = React.useState('');
+export function TaskCard({
+  task,
+  agents,
+  onStatusChange,
+  onUpdate,
+  onDelete,
+  onAssignAgent,
+  onViewDetail,
+  autoAssignMode = 'manual',
+  taskChatMessages = [],
+  onSendTaskMessage,
+}: TaskCardProps) {
+  const [showAssignModal, setShowAssignModal] = React.useState(false)
+  const [showChatDrawer, setShowChatDrawer] = React.useState(false)
+  const [userResponse, setUserResponse] = React.useState('')
 
-  const assignedAgent = agents.find(a => a.id === task.assignedAgentId);
-  const actionMessage = getActionMessage(task, assignedAgent, agents);
-
-  // Filter chat messages for this task
-  const taskMessages = taskChatMessages.filter(msg => msg.taskId === task.id);
+  const assignedAgent = agents.find(a => a.id === task.assignedAgentId)
+  const actionMessage = getActionMessage(task, assignedAgent, agents)
+  const taskMessages = taskChatMessages.filter(msg => msg.taskId === task.id)
+  const isFinished = task.status === 'completed' || task.status === 'cancelled' || task.status === 'failed'
 
   const handleAssign = (agentId: string) => {
     if (onAssignAgent) {
-      onAssignAgent(task.id, agentId);
-      onUpdate(task.id, { assignedAgentId: agentId, status: 'in_progress' });
+      onAssignAgent(task.id, agentId)
+      onUpdate(task.id, { assignedAgentId: agentId, status: 'in_progress' })
     }
-  };
+  }
 
   const handleUserResponse = () => {
     if (userResponse.trim() && onSendTaskMessage) {
-      onSendTaskMessage(task.id, userResponse.trim());
-      setUserResponse('');
+      onSendTaskMessage(task.id, userResponse.trim())
+      setUserResponse('')
     }
-  };
+  }
 
   return (
     <div
-      className={`p-3 bg-slate-700 rounded-lg border ${statusColors[task.status]} transition-all hover:border-slate-500`}
+      className={cn(
+        'group relative overflow-hidden rounded-xl',
+        'bg-[hsl(var(--card))] border border-[hsl(var(--border))]',
+        'border-l-4 transition-all duration-300',
+        statusConfig[task.status].borderColor,
+        isFinished && 'opacity-60',
+        'hover:shadow-lg hover:border-[hsl(var(--border))]/80'
+      )}
     >
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
-            <h4 className="text-sm font-medium text-white truncate">{task.title}</h4>
-            <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${priorityColors[task.priority]}`}>
-              {task.priority === 'urgent' ? '긴급' : task.priority === 'high' ? '높음' : task.priority === 'medium' ? '보통' : '낮음'}
-            </span>
-          </div>
-          {task.description && (
-            <p className="text-xs text-slate-400 line-clamp-2 mb-2">{task.description}</p>
-          )}
-          <div className="flex items-center gap-2 flex-wrap mb-2">
-            {task.tags.length > 0 && (
-              <div className="flex gap-1 flex-wrap">
-                {task.tags.slice(0, 2).map((tag, idx) => (
-                  <span key={idx} className="px-1.5 py-0.5 bg-slate-600 text-slate-300 text-xs rounded">
-                    {tag}
-                  </span>
-                ))}
-                {task.tags.length > 2 && (
-                  <span className="text-xs text-slate-500">+{task.tags.length - 2}</span>
-                )}
-              </div>
-            )}
-            {task.source !== 'manual' && (
-              <span className="text-xs text-slate-500">
-                {task.source === 'slack' ? '💬 Slack' : task.source === 'confluence' ? '📄 Confluence' : task.source}
+      {/* Hover Gradient */}
+      <div className="absolute inset-0 bg-gradient-to-br from-[hsl(var(--primary))]/5 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
+
+      <div className="relative p-4">
+        {/* Header */}
+        <div className="flex items-start justify-between gap-3 mb-3">
+          <div className="flex-1 min-w-0">
+            {/* Title */}
+            <h4 className="text-sm font-semibold text-[hsl(var(--foreground))] truncate mb-1.5">
+              {task.title}
+            </h4>
+
+            {/* Status & Priority Badges */}
+            <div className="flex items-center gap-2 flex-wrap">
+              {/* Status Badge */}
+              <span className={cn(
+                'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md',
+                'text-[10px] font-mono font-medium uppercase tracking-wider',
+                statusConfig[task.status].color,
+                'bg-[hsl(var(--muted))]/50 border border-[hsl(var(--border))]'
+              )}>
+                {statusConfig[task.status].icon}
+                {task.status.replace('_', ' ')}
               </span>
-            )}
-          </div>
 
-          {/* Action Message */}
-          <div className={`text-xs font-medium mb-3 ${
-            !task.assignedAgentId ? 'text-yellow-400' :
-            task.status === 'completed' ? 'text-green-400' :
-            task.status === 'in_progress' ? 'text-blue-400' :
-            'text-slate-400'
-          }`}>
-            Status: {actionMessage}
-            {assignedAgent && task.status === 'in_progress' && (
-              <span className="ml-2 text-slate-400">({assignedAgent.name})</span>
-            )}
-          </div>
-
-          {/* Agent Lifecycle Status Badge */}
-          {task.agentLifecycleStatus && (
-            <div className="mb-3">
-              <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold ${getStatusColor(task.agentLifecycleStatus)}`}>
-                <span>{getStatusIcon(task.agentLifecycleStatus)}</span>
-                <span>{getStatusLabel(task.agentLifecycleStatus)}</span>
+              {/* Priority Badge */}
+              <span className={cn(
+                'inline-flex items-center px-2 py-0.5 rounded-md',
+                'text-[10px] font-mono font-medium uppercase tracking-wider',
+                priorityConfig[task.priority].color,
+                priorityConfig[task.priority].bgColor,
+                'border',
+                priorityConfig[task.priority].borderColor
+              )}>
+                {priorityConfig[task.priority].label}
               </span>
             </div>
-          )}
-
-          {/* Pending Question */}
-          {task.pendingQuestion && task.agentLifecycleStatus === 'WAITING_USER' && (
-            <div className="mb-3 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
-              <div className="flex items-center gap-2 mb-2">
-                <svg className="w-4 h-4 text-amber-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <p className="text-xs font-semibold text-amber-400">Agent Question</p>
-              </div>
-              <p className="text-xs text-white mb-2 leading-relaxed">{task.pendingQuestion}</p>
-              <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  value={userResponse}
-                  onChange={(e) => setUserResponse(e.target.value)}
-                  onKeyPress={(e) => {
-                    if (e.key === 'Enter') {
-                      handleUserResponse();
-                    }
-                  }}
-                  placeholder="Type your answer..."
-                  className="flex-1 px-2 py-1.5 bg-slate-800 border border-slate-600 rounded text-white text-xs placeholder-slate-500 focus:outline-none focus:border-amber-500"
-                />
-                <button
-                  onClick={handleUserResponse}
-                  disabled={!userResponse.trim()}
-                  className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:bg-slate-600 disabled:cursor-not-allowed text-white text-xs font-medium rounded transition-colors"
-                >
-                  Send
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Action Buttons */}
-          <div className="flex items-center gap-2">
-            {onSendTaskMessage && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setShowChatDrawer(true);
-                }}
-                className="px-3 py-1.5 bg-slate-600 hover:bg-slate-500 text-white text-xs font-medium rounded transition-colors flex items-center gap-1"
-                title="Chat with agent about this task"
-              >
-                💬 Chat
-                {taskMessages.length > 0 && (
-                  <span className="ml-1 px-1.5 py-0.5 bg-blue-500 text-white text-xs rounded-full">
-                    {taskMessages.length}
-                  </span>
-                )}
-              </button>
-            )}
-            {onViewDetail && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onViewDetail(task.id);
-                }}
-                className="px-3 py-1.5 bg-slate-600 hover:bg-slate-500 text-white text-xs font-medium rounded transition-colors"
-              >
-                View Detail
-              </button>
-            )}
-            {!task.assignedAgentId && onAssignAgent && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setShowAssignModal(true);
-                }}
-                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded transition-colors"
-              >
-                Assign Agent
-              </button>
-            )}
-            {task.status !== 'completed' && task.status !== 'cancelled' && task.status !== 'failed' && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onStatusChange(task.id, 'cancelled');
-                }}
-                className="px-3 py-1.5 bg-slate-700 hover:bg-red-600 text-slate-300 hover:text-white text-xs font-medium rounded transition-colors"
-              >
-                Cancel
-              </button>
-            )}
           </div>
-        </div>
-        <div className="flex items-center gap-1">
-          {/* 자동 할당 토글 (수동 모드일 때만 표시) */}
-          {autoAssignMode === 'manual' && task.autoAssign !== undefined && (
+
+          {/* Right Actions */}
+          <div className="flex flex-col items-center gap-1">
+            {autoAssignMode === 'manual' && task.autoAssign !== undefined && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onUpdate(task.id, { autoAssign: !task.autoAssign })
+                }}
+                className={cn(
+                  'p-1.5 rounded-lg transition-all duration-200',
+                  'hover:bg-[hsl(var(--muted))]',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--ring))]',
+                  task.autoAssign
+                    ? 'text-[hsl(var(--success))] bg-[hsl(var(--success))]/10'
+                    : 'text-[hsl(var(--muted-foreground))]'
+                )}
+                title={task.autoAssign ? 'Auto-assign ON' : 'Auto-assign OFF'}
+              >
+                {task.autoAssign ? <Zap className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+              </button>
+            )}
             <button
               onClick={(e) => {
-                e.stopPropagation();
-                onUpdate(task.id, { autoAssign: !task.autoAssign });
+                e.stopPropagation()
+                onDelete(task.id)
               }}
-              className={`p-1 rounded transition-colors ${
-                task.autoAssign
-                  ? 'text-green-400 hover:text-green-300 bg-green-500/20'
-                  : 'text-slate-400 hover:text-slate-300'
-              }`}
-              title={task.autoAssign ? '자동 할당 끄기' : '자동 할당 켜기'}
+              className={cn(
+                'p-1.5 rounded-lg transition-all duration-200',
+                'text-[hsl(var(--muted-foreground))]',
+                'hover:text-[hsl(var(--destructive))] hover:bg-[hsl(var(--destructive))]/10',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--ring))]'
+              )}
+              title="Delete"
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                {task.autoAssign ? (
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                ) : (
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7 3H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v10a2 2 0 01-2 2z" />
-                )}
-              </svg>
+              <X className="w-4 h-4" />
             </button>
+          </div>
+        </div>
+
+        {/* Description */}
+        {task.description && (
+          <p className="text-xs text-[hsl(var(--muted-foreground))] line-clamp-2 mb-3 leading-relaxed">
+            {task.description}
+          </p>
+        )}
+
+        {/* Tags */}
+        {task.tags.length > 0 && (
+          <div className="flex items-center gap-1.5 flex-wrap mb-3">
+            {task.tags.slice(0, 3).map((tag, idx) => (
+              <span
+                key={idx}
+                className={cn(
+                  'px-2 py-0.5 rounded text-[10px] font-mono',
+                  'bg-[hsl(var(--muted))]/50 text-[hsl(var(--muted-foreground))]',
+                  'border border-[hsl(var(--border))]'
+                )}
+              >
+                #{tag}
+              </span>
+            ))}
+            {task.tags.length > 3 && (
+              <span className="text-[10px] text-[hsl(var(--muted-foreground))] font-mono">
+                +{task.tags.length - 3}
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* Action Message */}
+        <div className={cn(
+          'flex items-center gap-2 mb-3 text-xs font-medium',
+          !task.assignedAgentId && 'text-[hsl(var(--warning))]',
+          task.status === 'completed' && 'text-[hsl(var(--success))]',
+          task.status === 'in_progress' && 'text-[hsl(var(--info))]',
+          task.status === 'pending' && 'text-[hsl(var(--muted-foreground))]',
+          task.status === 'failed' && 'text-[hsl(var(--destructive))]'
+        )}>
+          <span>{actionMessage}</span>
+          {assignedAgent && task.status === 'in_progress' && (
+            <span className="text-[hsl(var(--muted-foreground))] font-normal">
+              ({assignedAgent.name})
+            </span>
           )}
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onDelete(task.id);
-            }}
-            className="p-1 text-slate-400 hover:text-red-400 transition-colors"
-            title="삭제"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+        </div>
+
+        {/* Agent Lifecycle Status */}
+        {task.agentLifecycleStatus && (
+          <div className="mb-3">
+            <span
+              className={cn(
+                'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold',
+                getStatusColor(task.agentLifecycleStatus)
+              )}
+            >
+              <span>{getStatusIcon(task.agentLifecycleStatus)}</span>
+              <span>{getStatusLabel(task.agentLifecycleStatus)}</span>
+            </span>
+          </div>
+        )}
+
+        {/* Pending Question */}
+        {task.pendingQuestion && task.agentLifecycleStatus === 'WAITING_USER' && (
+          <div className={cn(
+            'mb-3 p-3 rounded-lg',
+            'bg-[hsl(var(--warning))]/5 border border-[hsl(var(--warning))]/20'
+          )}>
+            <div className="flex items-center gap-2 mb-2">
+              <AlertCircle className="w-4 h-4 text-[hsl(var(--warning))]" />
+              <p className="text-xs font-semibold text-[hsl(var(--warning))]">Agent Question</p>
+            </div>
+            <p className="text-xs text-[hsl(var(--foreground))] mb-3 leading-relaxed">
+              {task.pendingQuestion}
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={userResponse}
+                onChange={(e) => setUserResponse(e.target.value)}
+                onKeyPress={(e) => e.key === 'Enter' && handleUserResponse()}
+                placeholder="Type your answer..."
+                className={cn(
+                  'flex-1 h-8 px-3 rounded-lg text-xs font-mono',
+                  'bg-[hsl(var(--background))] border border-[hsl(var(--border))]',
+                  'text-[hsl(var(--foreground))] placeholder:text-[hsl(var(--muted-foreground))]',
+                  'focus:outline-none focus:ring-2 focus:ring-[hsl(var(--warning))]/50',
+                  'transition-all duration-200'
+                )}
+              />
+              <Button
+                size="sm"
+                onClick={handleUserResponse}
+                disabled={!userResponse.trim()}
+                className="h-8"
+              >
+                Send
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* Action Buttons */}
+        <div className="flex items-center gap-2 flex-wrap">
+          {onSendTaskMessage && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation()
+                setShowChatDrawer(true)
+              }}
+              className="h-7 text-xs"
+            >
+              <MessageSquare className="w-3 h-3 mr-1" />
+              Chat
+              {taskMessages.length > 0 && (
+                <span className={cn(
+                  'ml-1.5 min-w-4 h-4 px-1 rounded text-[10px] font-mono',
+                  'bg-[hsl(var(--primary))]/10 text-[hsl(var(--primary))]'
+                )}>
+                  {taskMessages.length}
+                </span>
+              )}
+            </Button>
+          )}
+          {onViewDetail && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation()
+                onViewDetail(task.id)
+              }}
+              className="h-7 text-xs"
+            >
+              <Eye className="w-3 h-3 mr-1" />
+              Detail
+            </Button>
+          )}
+          {!task.assignedAgentId && onAssignAgent && (
+            <Button
+              variant="default"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation()
+                setShowAssignModal(true)
+              }}
+              className="h-7 text-xs"
+            >
+              <UserPlus className="w-3 h-3 mr-1" />
+              Assign
+            </Button>
+          )}
+          {!isFinished && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation()
+                onStatusChange(task.id, 'cancelled')
+              }}
+              className={cn(
+                'h-7 text-xs',
+                'text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--destructive))]'
+              )}
+            >
+              Cancel
+            </Button>
+          )}
         </div>
       </div>
-      <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
-        <span>{new Date(task.createdAt).toLocaleDateString('ko-KR', { month: 'short', day: 'numeric' })}</span>
+
+      {/* Footer */}
+      <div className={cn(
+        'px-4 py-2 border-t border-[hsl(var(--border))]',
+        'bg-[hsl(var(--muted))]/30'
+      )}>
+        <div className="flex items-center justify-between text-[10px] text-[hsl(var(--muted-foreground))] font-mono">
+          <span>
+            {new Date(task.createdAt).toLocaleDateString('en-US', {
+              month: 'short',
+              day: 'numeric',
+              year: 'numeric'
+            })}
+          </span>
+          {task.source !== 'manual' && (
+            <span className="uppercase tracking-wider">
+              {task.source}
+            </span>
+          )}
+        </div>
       </div>
 
       <AssignAgentModal
@@ -287,6 +435,5 @@ export function TaskCard({ task, agents, onStatusChange, onUpdate, onDelete, onA
         />
       )}
     </div>
-  );
+  )
 }
-

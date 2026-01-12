@@ -1,9 +1,11 @@
-import { useCallback, useMemo, useEffect } from 'react';
+import { useCallback, useMemo, useEffect, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { OrchestrationService } from './services/orchestration';
 import { DashboardLayout } from './components/layout/DashboardLayout';
 import { ChatPanel } from './components/chat/ChatPanel';
 import { ToastContainer } from './components/common/ToastContainer';
+import { CommandPalette } from './components/common/CommandPalette';
+import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import {
   useAgentStore,
   useTaskStore,
@@ -23,6 +25,11 @@ type TabType = 'dashboard' | 'tasks' | 'personalization' | 'settings';
 function App() {
   const location = useLocation();
   const navigate = useNavigate();
+
+  // Command Palette state
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [showCreateTaskModal, setShowCreateTaskModal] = useState(false);
+  const [showCreateAgentModal, setShowCreateAgentModal] = useState(false);
 
   // Derive active tab from URL
   const activeTab: TabType = useMemo(() => {
@@ -371,40 +378,117 @@ function App() {
     [navigate]
   );
 
+  // Command Palette handlers
+  const openCommandPalette = useCallback(() => {
+    setIsCommandPaletteOpen(true);
+  }, []);
+
+  const closeCommandPalette = useCallback(() => {
+    setIsCommandPaletteOpen(false);
+  }, []);
+
+  const openCreateTaskModal = useCallback(() => {
+    setShowCreateTaskModal(true);
+  }, []);
+
+  const openCreateAgentModal = useCallback(() => {
+    setShowCreateAgentModal(true);
+  }, []);
+
+  // Keyboard shortcuts
+  useKeyboardShortcuts({
+    shortcuts: [
+      {
+        key: 'k',
+        ctrl: true,
+        action: openCommandPalette,
+        description: 'Open Command Palette',
+      },
+      {
+        key: 'n',
+        ctrl: true,
+        action: openCreateTaskModal,
+        description: 'Create New Task',
+      },
+      {
+        key: 'a',
+        ctrl: true,
+        shift: true,
+        action: openCreateAgentModal,
+        description: 'Create New Agent',
+      },
+      {
+        key: '1',
+        action: () => handleTabChange('tasks'),
+        description: 'Go to Tasks',
+      },
+      {
+        key: '2',
+        action: () => handleTabChange('dashboard'),
+        description: 'Go to Dashboard',
+      },
+      {
+        key: '3',
+        action: () => handleTabChange('personalization'),
+        description: 'Go to Personalization',
+      },
+      {
+        key: '4',
+        action: () => handleTabChange('settings'),
+        description: 'Go to Settings',
+      },
+    ],
+  });
+
   return (
     <>
       <ToastContainer />
+
+      {/* Command Palette */}
+      <CommandPalette
+        isOpen={isCommandPaletteOpen}
+        onClose={closeCommandPalette}
+        onNavigate={handleTabChange}
+        onCreateTask={openCreateTaskModal}
+        onCreateAgent={openCreateAgentModal}
+      />
+
       <DashboardLayout
         activeTab={activeTab}
         onTabChange={handleTabChange}
         rightPanel={
-        <ChatPanel
-          llmConfig={settings.llmConfig}
-          agentCount={allAgents.length}
-          mcpCount={settings.mcpServices.filter((s) => s.status === 'connected').length}
-          personalizationCount={personalizationItems.length}
-          onSaveInsight={handleSaveInsightFromChat}
-          onAutoSavePersonalization={handleAutoSavePersonalization}
-          externalMessages={chatMessages}
-          onMessagesRead={clearChatMessages}
-          onSendMessage={handleSendChatMessage}
-          useOrchestration={true}
+          <ChatPanel
+            llmConfig={settings.llmConfig}
+            agentCount={allAgents.length}
+            mcpCount={settings.mcpServices.filter((s) => s.status === 'connected').length}
+            personalizationCount={personalizationItems.length}
+            onSaveInsight={handleSaveInsightFromChat}
+            onAutoSavePersonalization={handleAutoSavePersonalization}
+            externalMessages={chatMessages}
+            onMessagesRead={clearChatMessages}
+            onSendMessage={handleSendChatMessage}
+            useOrchestration={true}
+          />
+        }
+      >
+        {/* Render routed pages */}
+        <Outlet
+          context={{
+            handleApprove,
+            handleReject,
+            handleSelectOption,
+            handleApprovalRespond,
+            handleCreateAgent,
+            handleAssignAgent,
+            handleRespondInteraction,
+            handleSendTaskMessage,
+            // Modal controls
+            showCreateTaskModal,
+            setShowCreateTaskModal,
+            showCreateAgentModal,
+            setShowCreateAgentModal,
+          }}
         />
-      }
-    >
-      {/* Render routed pages */}
-      <Outlet
-        context={{
-          handleApprove,
-          handleReject,
-          handleSelectOption,
-          handleApprovalRespond,
-          handleCreateAgent,
-          handleAssignAgent,
-          handleRespondInteraction,
-          handleSendTaskMessage,
-        }}
-      />
       </DashboardLayout>
     </>
   );
